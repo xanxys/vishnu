@@ -1,0 +1,4 @@
+#!/bin/env fish
+
+ghc --make Main -threaded -O2 -o vishnu
+
