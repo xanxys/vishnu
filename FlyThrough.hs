@@ -4,6 +4,8 @@ import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
+import Foreign.Marshal
+import Data.Word
 import Data.Maybe
 import Data.IORef
 import Data.Time.Clock
@@ -53,6 +55,9 @@ flyThroughView=safeTrampoline $ \cvc->do
             vs0<-readIORef vs
             cv0<-takeMVar cvc
             disp vs0 cv0
+        
+    G.texture G.Texture2D G.$= G.Enabled
+    mkTexture >>= bindTexture
     
     idleCallback $= Just rFrame
     mainLoop
@@ -60,6 +65,36 @@ flyThroughView=safeTrampoline $ \cvc->do
     -- deallocate
     killThread ve
 
+bindTexture t=textureBinding Texture2D $= Just t
+
+mkTexture=do
+	[tn]<-genObjectNames 1
+	textureBinding Texture2D $= Just tn
+	
+	textureWrapMode Texture2D G.S $= (G.Mirrored,G.Repeat)
+	textureWrapMode Texture2D G.T $= (G.Mirrored,G.Repeat)
+	
+	ptr<-mallocBytes (4*n^2)
+	let
+	    calcRGBA :: Int -> Int -> [Word8]
+	    calcRGBA ix iy=[255,255,255,floor $ 255*calcV r]
+	        where r=((fromIntegral ix)^2+(fromIntegral iy)^2)/(fromIntegral n^2)
+        
+	    calcV :: Double -> Double
+	    calcV r=exp $ (-9)*r
+		
+	pokeArray ptr $ concat [calcRGBA x y|x<-[0..n-1],y<-[0..n-1]]
+	texImage2D Nothing NoProxy 0 RGBA' (TextureSize2D (fromIntegral n) (fromIntegral n))
+	     0 (PixelData G.RGBA UnsignedByte ptr)
+	free ptr
+
+	textureFilter Texture2D $= ((Nearest,Nothing),Linear') -- Linear'
+	
+	--unbindTexture
+	
+	return tn
+	where n=64 :: Int
+	
 
 -- | utility function to ensure f is executed in separate OS thread.
 safeTrampoline :: (MVar (Frame,SharedWorld) -> IO ()) -> ViewIO ()
@@ -167,8 +202,9 @@ disp vs (fr,SharedWorld m)=do
     G.blendFunc G.$= (G.SrcAlpha,G.OneMinusSrcAlpha)
 
     -- render
-    withVS vs $ do
-        mapM_ (renderPoint m) $ sortBy (comparing (negate . pointDistance vs)) $ M.keys m -- pointsInView vs
+    let ViewerState pcam _ _ _=vs
+    withVS vs $ G.renderPrimitive Triangles $
+        mapM_ (renderPoint m pcam) $ sortBy (comparing (negate . pointDistance vs)) $ M.keys m -- pointsInView vs
         
     -- end frame
     swapBuffers
@@ -202,11 +238,30 @@ pointsInView (ViewerState (V.Vec3D tx ty tz) _ _ _)=
 
 
 
-renderPoint m p@(ix,iy,iz)=
+renderPoint m pcam p@(ix,iy,iz)=
     case M.lookup p m of
         Nothing -> return ()
-        Just (World.RGBA r g b a) -> G.preservingMatrix $ do
-            G.translate $ G.Vector3 (fromIntegral ix) (fromIntegral iy) (fromIntegral iz :: G.GLdouble)
+        Just (World.RGBA r g b a) -> do
             G.color $ G.Color4 r g b a
-            renderObject Solid $ Sphere' 1 3 3
+            let p=V.Vec3D (fromIntegral ix) (fromIntegral iy) (fromIntegral iz)
+            pointTriangle p pcam 3
+
+
+pointTriangle :: V.Vec3D -> V.Vec3D -> Double -> IO ()
+pointTriangle p q sigma=pt 1 0 >> pt (-0.5) 0.87 >> pt (-0.5) (-0.87)
+    where
+        pt s t=do
+            G.texCoord $ G.TexCoord2 s t
+            G.vertex $ v2v $ p + V.map (*(s*sigma)) eS + V.map (*(t*sigma)) eT
+        
+        n=normalize $ q-p
+        eS=normalize $ (V.Vec3D 1 0 0) `cross3D` n
+        eT=n `cross3D` eS
+        
+        normalize v=V.map (/(V.norm v)) v
+        
+
+
+
+v2v (V.Vec3D x y z)=G.Vertex3 x y z
 

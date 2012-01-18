@@ -14,8 +14,6 @@ import CUI
 import Graphics.UI.Gtk
 
 main=do
-    
-    
     views<-newMVar []
     ch_action<-newChan
     controller<-forkIO $ processAction ch_action emptyWorld
