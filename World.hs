@@ -66,6 +66,7 @@ spawn df view=do
 -- | shared model is incorrect, but a reasonable approximation.
 --
 -- Using gaussian basis with sigma=delta erases any data on underlying lattice (proof left to the reader).
+-- (Part of it can be reduced to whether \Sigma_{i \elem Z} exp(-(i+d)^2)=const for all d)
 --
 -- However, gaussian basis is not compact. By introducing noise to observed value, you can make it compact(?)
 -- No. A view can observe infinitely many times to reduce noise to 0.
@@ -89,27 +90,29 @@ observe_raw (SharedWorld m) p=
 put_frame :: SharedWorld -> Frame -> V.Vec3D -> Double -> RGBA -> SharedWorld
 put_frame w f p dt v=put_raw w (frame_to_world f p) dt v
 
+
 put_raw :: SharedWorld -> V.Vec3D -> Double -> RGBA -> SharedWorld
 put_raw (SharedWorld m) p dt v=SharedWorld m'
     where
         m'=foldl' (\m (pi,w)->M.alter (f w) pi m) m $ discreteGaussian p
-        def=RGBA 0 0 0 0
-        f w v0=Just $ mulV (1-w') (maybe def id v0) `addV` mulV w' v --  TODO: semantics regarding alpha is ambiguous
+        def=RGBA 1 1 1 0
+        f w v0=Just $ mixV w' (maybe def id v0) v
             where w'=w*(1-exp (realToFrac (-dt)))
 
-mulAV k (RGBA r g b a)=RGBA r g b (k*a)
+
 mulV k (RGBA r g b a)=RGBA (k*r) (k*g) (k*b) (k*a)
 sumV=foldl1' addV
 addV (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA (r0+r1) (g0+g1) (b0+b1) (a0+a1)
 
-mixV (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA (r0*ka0+r1*ka1) (g0*ka0+g1*ka1) (b0*ka0+b1*ka1) (a0+a1)
+
+-- (1-w)a+wb
+mixV :: Float -> RGBA -> RGBA -> RGBA
+mixV w (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA 
+    (r0*ka0+r1*ka1) (g0*ka0+g1*ka1) (b0*ka0+b1*ka1) (a')
     where
-        ka0
-            |a0<-1e-3 = 0
-            |otherwise = a0/(a0+a1)
-        ka1
-            |a1<-1e-3 = 0
-            |otherwise = a1/(a0+a1)
+        a'=(1-w)*a0+w*a1
+        ka0=(1-w)*a0/a'
+        ka1=w*a1/a'
 
 -- | discretize gaussian kernel
 discreteGaussian :: V.Vec3D -> [((Int,Int,Int),Float)]

@@ -81,7 +81,7 @@ mkTexture=do
 	        where r=((fromIntegral ix)^2+(fromIntegral iy)^2)/(fromIntegral n^2)
         
 	    calcV :: Double -> Double
-	    calcV r=exp $ (-9)*r
+	    calcV r=exp $ (-16)*r
 		
 	pokeArray ptr $ concat [calcRGBA x y|x<-[0..n-1],y<-[0..n-1]]
 	texImage2D Nothing NoProxy 0 RGBA' (TextureSize2D (fromIntegral n) (fromIntegral n))
@@ -244,7 +244,7 @@ renderPoint m pcam p@(ix,iy,iz)=
         Just (World.RGBA r g b a) -> do
             G.color $ G.Color4 r g b a
             let p=V.Vec3D (fromIntegral ix) (fromIntegral iy) (fromIntegral iz)
-            pointTriangle p pcam 3
+            pointTriangle p pcam 4
 
 
 pointTriangle :: V.Vec3D -> V.Vec3D -> Double -> IO ()
