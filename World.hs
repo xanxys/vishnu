@@ -71,7 +71,7 @@ spawn df view=do
 -- However, gaussian basis is not compact. By introducing noise to observed value, you can make it compact(?)
 -- No. A view can observe infinitely many times to reduce noise to 0.
 --
-data SharedWorld=SharedWorld (M.Map (Int,Int,Int) RGBA)
+data SharedWorld=SharedWorld (M.Map V.Vec3I RGBA)
 
 data RGBA=RGBA !Float !Float !Float !Float deriving(Show)
 
@@ -115,13 +115,13 @@ mixV w (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA
         ka1=w*a1/a'
 
 -- | discretize gaussian kernel
-discreteGaussian :: V.Vec3D -> [((Int,Int,Int),Float)]
-discreteGaussian (V.Vec3D x y z)=map f ps
+discreteGaussian :: V.Vec3D -> [(V.Vec3I,Float)]
+discreteGaussian p0=map f ps
     where
-        [ix,iy,iz]=map round [x,y,z]
-        ps=liftM3 (,,) [ix-3..ix+3] [iy-3..iy+3] [iz-3..iz+3]
-        f p@(ix,iy,iz)=(p,realToFrac w)
-            where w=exp $ negate $ sum $ map (^2) $ zipWith (-) (map fromIntegral [ix,iy,iz]) [x,y,z]
+        V.Vec3I ix iy iz=V.map round p0
+        ps=liftM3 V.Vec3I [ix-3..ix+3] [iy-3..iy+3] [iz-3..iz+3]
+        f p=(p,realToFrac w)
+            where w=exp $ negate $ V.normSq $ (V.map fromIntegral p) - p0
 
 
 

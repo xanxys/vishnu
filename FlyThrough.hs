@@ -1,4 +1,5 @@
 module FlyThrough(flyThroughView) where
+import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Exception
@@ -202,9 +203,12 @@ disp vs (fr,SharedWorld m)=do
     G.blendFunc G.$= (G.SrcAlpha,G.OneMinusSrcAlpha)
 
     -- render
-    let ViewerState pcam _ _ _=vs
+    let
+        ViewerState pcam _ _ _=vs
+        ps=map (V.map fromIntegral *** id) $ M.assocs m :: [(V.Vec3D,World.RGBA)]
     withVS vs $ G.renderPrimitive Triangles $
-        mapM_ (renderPoint m pcam) $ sortBy (comparing (negate . pointDistance vs)) $ M.keys m -- pointsInView vs
+        mapM_ (uncurry $ renderPoint pcam) $ sortBy (comparing (\x-> - V.norm (fst x-pcam))) ps
+            
         
     -- end frame
     swapBuffers
@@ -220,32 +224,11 @@ withVS (ViewerState (V.Vec3D tx ty tz) _ pitch yaw) f=G.preservingMatrix $ do
         G.translate $ G.Vector3 (-tx) (-ty) (-tz)
         f
 
-pointDistance :: ViewerState -> (Int,Int,Int) -> Double
-pointDistance (ViewerState p _ _ _) (x,y,z)=
-    V.norm $ p-(V.Vec3D (fromIntegral x) (fromIntegral y) (fromIntegral z))
 
--- | Return points in view in approximately farthest-first order
-pointsInView :: ViewerState -> [(Int,Int,Int)]
-pointsInView (ViewerState (V.Vec3D tx ty tz) _ _ _)=
-    map (\(x,y,z)->(ox+x,oy+y,oz+z)) $
-    sortBy (comparing (\(x,y,z)->negate $ abs x+abs y+abs z)) ps
-    where
-        ps=liftM3 (,,) [-n..n] [-n..n] [-n..n]
-        ox=round tx
-        oy=round ty
-        oz=round tz
-        n=20
-
-
-
-renderPoint m pcam p@(ix,iy,iz)=
-    case M.lookup p m of
-        Nothing -> return ()
-        Just (World.RGBA r g b a) -> do
-            G.color $ G.Color4 r g b a
-            let p=V.Vec3D (fromIntegral ix) (fromIntegral iy) (fromIntegral iz)
-            pointTriangle p pcam 4
-
+renderPoint :: V.Vec3D -> V.Vec3D -> World.RGBA -> IO ()
+renderPoint pcam pt (World.RGBA r g b a)=do
+    G.color $ G.Color4 r g b a
+    pointTriangle pt pcam 4
 
 pointTriangle :: V.Vec3D -> V.Vec3D -> Double -> IO ()
 pointTriangle p q sigma=pt 1 0 >> pt (-0.5) 0.87 >> pt (-0.5) (-0.87)
@@ -258,7 +241,7 @@ pointTriangle p q sigma=pt 1 0 >> pt (-0.5) 0.87 >> pt (-0.5) (-0.87)
         eS=normalize $ (V.Vec3D 1 0 0) `cross3D` n
         eT=n `cross3D` eS
         
-        normalize v=V.map (/(V.norm v)) v
+        normalize v=let k=1/V.norm v in V.map (*k) v
         
 
 
