@@ -1,4 +1,17 @@
+{-# LANGUAGE TupleSections #-}
+-- | expose world via 'BiParticle'
+--
+-- why "biparticle"?
+--
+-- externally viewed (i.e. from our world), it's a piece of program that somehow
+-- connectsto vishnu and pull information out.
+--
+-- internally viewed (i.e. from vishnu), it's a particle that somehow "decides" its own behavior.
+--
+-- So the same thing can be viewed as a particle from both sides, thus the name bi-particle.
+--
 module World where
+import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
@@ -15,166 +28,182 @@ import System.IO
 import System.Environment
 import Text.Printf
 
--- | view IO
+
+
+
+-- | BiParticleIO defines external behavior of BiParticle
 --
--- 2 reasonable alternatives:
--- * separate observe :: pos -> IO val ,put :: pos -> val -> IO () interface
--- I cannot (yet) construct simmetry beween observe and put...
--- So there's no way but separate them.
+-- Definition of BiParticle:
+-- external -> internal:
+--  * feed continuous velocity and angular velocity
+--  * spawn new TransPariticle with externally defined behavior
 --
--- Maybe, just maybe, use of stationary frame forbids symmetrical time treatment...
--- 'cause if the frame is slightly moving, you can't stay at the same point for long time.
+-- internal -> external:
+--  * stream of discrete photons
 --
-type ViewIO a=ReaderT (Frame,Chan Action,IO ()->IO ()) IO a
+-- However, there are multiple way to expose this model in real programming language.
+-- Here, we define stateful accumulative interface.
+--  * exchange_photon
+--  * set_velocity
+--  * set_rotation
+--  * spawn
+--
+-- set_velocity and set_rotation are separated merely for convenience, and each TransPariticle
+-- should maintain them on their own if needed.
+-- 
+type BiParticleIO a=ReaderT (Chan (ThreadId,Action)) IO a
 
--- | sec
-observe :: Double -> V.Vec3D -> ViewIO RGBA
-observe dt p=do
-    (f,ch,_)<-ask
-    liftIO $ do
-        mv<-newEmptyMVar
-        writeChan ch $ ActionObserve n 0 (frame_to_world f p) (RGBA 0 0 0 0) mv
-        readMVar mv
-    where n=max 1 $ ceiling $ 100*dt
+-- | emit a single photon
+emit_photon :: (V.Vec3D,PhotonType) -> BiParticleIO ()
+emit_photon ph=requestAction $ EmitPhoton $ first (V.map realToFrac) ph
 
+-- | Get all previously absorbed photons and empty the photon accumulator.
+exchange_photon :: BiParticleIO [(V.Vec3D,PhotonType)]
+exchange_photon=do
+    mv<-liftIO $ newEmptyMVar
+    requestAction $ ExchangePhoton mv
+    liftM (map $ first $ V.map realToFrac) $ liftIO $ readMVar mv
 
-put :: Double -> V.Vec3D -> RGBA -> ViewIO ()
-put dt p val=do
-    (f,ch,_)<-ask
-    liftIO $ do
-        mv<-newEmptyMVar
-        writeChan ch $ ActionPut n 0 (frame_to_world f p) val mv
-        readMVar mv
-    where n=max 1 $ ceiling $ 100*dt
+-- | Set velocity and keep it until further call to this function.
+set_velocity :: V.Vec3D -> BiParticleIO ()
+set_velocity v=requestAction $ SetVelocity $ V.map realToFrac v
 
-unsafePeek :: ViewIO (Frame,SharedWorld)
-unsafePeek=do
-    (f,ch,_)<-ask
-    liftIO $ do
-        mv<-newEmptyMVar
-        writeChan ch $ ActionUnsafePeek mv
-        w<-readMVar mv
-        return (f,w)
+-- | Set angular velocity and keep it until further call to this function.
+set_rotation :: V.Vec3D -> BiParticleIO ()
+set_rotation r=requestAction $ SetRotation $ V.map realToFrac r
 
-spawn :: Frame -> ViewIO () -> ViewIO ()
-spawn df view=do
-    (f,ch,sp)<-ask
-    liftIO $ sp $ runReaderT view (compose_frame f df,ch,sp)
+-- | Spawn new TransParticle that shares current position and velocity
+spawn :: BiParticleIO () -> BiParticleIO ()
+spawn f=requestAction $ Spawn f
 
-
+requestAction :: Action -> BiParticleIO ()
+requestAction a=do
+    ch<-ask
+    ti<-liftIO $ myThreadId
+    liftIO $ writeChan ch (ti,a)
 
 -- | shared model is incorrect, but a reasonable approximation.
 --
--- Using gaussian basis with sigma=delta erases any data on underlying lattice (proof left to the reader).
--- (Part of it can be reduced to whether \Sigma_{i \elem Z} exp(-(i+d)^2)=const for all d)
---
--- However, gaussian basis is not compact. By introducing noise to observed value, you can make it compact(?)
--- No. A view can observe infinitely many times to reduce noise to 0.
---
-data SharedWorld=SharedWorld (M.Map V.Vec3I RGBA)
+data SharedWorld=SharedWorld (M.Map V.Vec3I [BiParticle]) (M.Map V.Vec3I [Photon])
 
-data RGBA=RGBA !Float !Float !Float !Float deriving(Show)
+data BiParticle=BiParticle BiParticleS ThreadId
 
-emptyWorld=SharedWorld M.empty
+data BiParticleS=BiParticleS
+    !V.Vec3F -- ^ fractional position (internal)
+    !V.Vec3F -- ^ velocity (external, used for interfacing)
+    !QD -- ^ orientation (internal)
+    !V.Vec3F -- ^ angular velocity (external)
+    [(V.Vec3F,PhotonType)] -- ^ absorbed photons
 
-observe_frame :: SharedWorld -> Frame -> V.Vec3D -> RGBA
-observe_frame w f p=observe_raw w (frame_to_world f p)
+data Photon=Photon
+    V.Vec3F -- ^ direction
+    V.Vec3F -- ^ fractional coordinate [-0.5,0.5]^3
+    PhotonType -- ^ color of photon
 
-observe_raw :: SharedWorld -> V.Vec3D -> RGBA
-observe_raw (SharedWorld m) p=
-    sumV $ map (\(pi,w)->mulV w $ M.findWithDefault def pi m) $ discreteGaussian p
+-- | Color of photon is discretized. And there's no such concept as wavelength;
+-- since vishnu is based on geometric optics.
+data PhotonType=Red|Green|Blue
+
+
+
+
+
+type Absorption=[(V.Vec3I,Photon)]
+type Emission=[(V.Vec3I,Photon)]
+
+stepLight :: Emission -> SharedWorld -> (SharedWorld,Absorption)
+stepLight emission=(first $ emitLight emission) . (first propagateLight) . absorbLight
+
+absorbLight :: SharedWorld -> (SharedWorld,Absorption)
+absorbLight (SharedWorld pas phs)=(SharedWorld pas phs',mmAssocs dphs)
     where
-        def=RGBA 0 0 0 0
+        (dphs,phs')=M.partitionWithKey (const . occupied) phs
+        occupied=not . null . flip (M.findWithDefault []) pas
 
 
-put_frame :: SharedWorld -> Frame -> V.Vec3D -> Double -> RGBA -> SharedWorld
-put_frame w f p dt v=put_raw w (frame_to_world f p) dt v
-
-
-put_raw :: SharedWorld -> V.Vec3D -> Double -> RGBA -> SharedWorld
-put_raw (SharedWorld m) p dt v=SharedWorld m'
+propagateLight :: SharedWorld -> SharedWorld
+propagateLight (SharedWorld pas phs)=SharedWorld pas phs'
     where
-        m'=foldl' (\m (pi,w)->M.alter (f w) pi m) m $ discreteGaussian p
-        def=RGBA 1 1 1 0
-        f w v0=Just $ mixV w' (maybe def id v0) v
-            where w'=w*(1-exp (realToFrac (-dt)))
+        phs'=M.filterWithKey (const . keepIndex) $ mmUpdate propagatePhoton phs
+        keepIndex v=V.normSq v<500^2
 
 
-mulV k (RGBA r g b a)=RGBA (k*r) (k*g) (k*b) (k*a)
-sumV=foldl1' addV
-addV (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA (r0+r1) (g0+g1) (b0+b1) (a0+a1)
-
-
--- (1-w)a+wb
-mixV :: Float -> RGBA -> RGBA -> RGBA
-mixV w (RGBA r0 g0 b0 a0) (RGBA r1 g1 b1 a1)=RGBA 
-    (r0*ka0+r1*ka1) (g0*ka0+g1*ka1) (b0*ka0+b1*ka1) (a')
+emitLight :: Emission -> SharedWorld -> SharedWorld
+emitLight es (SharedWorld pas phs)=SharedWorld pas phs'
     where
-        a'=(1-w)*a0+w*a1
-        ka0=(1-w)*a0/a'
-        ka1=w*a1/a'
+        phs'=foldl' (\m (i,p)->mmInsert i p m) phs es
 
--- | discretize gaussian kernel
-discreteGaussian :: V.Vec3D -> [(V.Vec3I,Float)]
-discreteGaussian p0=map f ps
+
+-- TODO: fix minor numerical error in calculation of pos' (+0.01 thing)
+propagatePhoton :: (V.Vec3I,Photon) -> (V.Vec3I,Photon)
+propagatePhoton (pos,Photon dir fpos col)=(pos+pi',Photon dir pf' col)
     where
-        V.Vec3I ix iy iz=V.map round p0
-        ps=liftM3 V.Vec3I [ix-3..ix+3] [iy-3..iy+3] [iz-3..iz+3]
-        f p=(p,realToFrac w)
-            where w=exp $ negate $ V.normSq $ (V.map fromIntegral p) - p0
+        (pi',pf')=decomposePos $ fpos+V.map (*(dt+0.01)) dir
+        dt=V.minimum dts
+        dts=(V.map ((*0.5) . signum) dir - fpos)/dir
 
 
-
--- | with current computers, light propagation is difficult to handle. ActionUnsafePeek is backdoor
--- to internal structure to accelerate rendering. This backdoor should be removed as soon as possible.
 data Action
-    =ActionObserve Int Int V.Vec3D RGBA (MVar RGBA)
-    |ActionPut Int Int V.Vec3D RGBA (MVar ())
-    |ActionUnsafePeek (MVar SharedWorld)
+    =EmitPhoton (V.Vec3F,PhotonType)
+    |ExchangePhoton (MVar [(V.Vec3F,PhotonType)])
+    |SetVelocity V.Vec3F
+    |SetRotation V.Vec3F
+    |Spawn (BiParticleIO ())
 
-data Result
-    =ResultObserve RGBA (MVar RGBA)
-    |ResultPut (MVar ())
-    |ResultUnsafePeek SharedWorld (MVar SharedWorld)
 
-commitAction :: Action -> SharedWorld -> (SharedWorld,Either Action Result)
-commitAction (ActionObserve n k p va mv) w
-    |n==k' = (w,Right $ ResultObserve (mulV (1/fromIntegral n) va') mv)
-    |n>k' = (w,Left $ ActionObserve n k' p va' mv)
+
+
+-- | move 'BiParticle's and return particles that crossed cell border
+moveBiParticles :: Float -> SharedWorld -> (SharedWorld,[(ThreadId,V.Vec3I)])
+moveBiParticles dt (SharedWorld pas phs)=(SharedWorld pas' phs,diff)
     where
-        k'=k+1
-        va'=addV va $ observe_raw w p
-commitAction (ActionPut n k p v mv) w
-    |n==k' =(w',Right $ ResultPut mv)
-    |n>k' =(w',Left $ ActionPut n k' p v mv)
-    where
-        w'=put_raw w p dt v
-        k'=k+1
-        dt=0.1
-commitAction (ActionUnsafePeek mv) w=(w,Right $ ResultUnsafePeek w mv)
+        pas'=mmFromList $ map (\(i,(di,p))->(i+di,p)) ps
+        diff=map (\(i,(di,BiParticle _ tid))->(tid,i+di)) dps
+        dps=filter ((/=V.Vec3I 0 0 0) . fst . snd) ps
+        ps=map (second $ moveBiParticle dt) $ mmAssocs pas
 
-finishResult :: Result -> IO ()
-finishResult (ResultObserve v mv)=putMVar mv v
-finishResult (ResultPut mv)=putMVar mv ()
-finishResult (ResultUnsafePeek w mv)=putMVar mv w
+moveBiParticle :: Float -> BiParticle -> (V.Vec3I,BiParticle)
+moveBiParticle dt (BiParticle (BiParticleS p p' o o' ps) tid)=
+    (pn_i,BiParticle (BiParticleS pn_f p' on o' ps) tid)
+    where
+        (pn_i,pn_f)=decomposePos $ p+V.map (*dt) p'
+        on=o -- TODO: rotate o by dt*o'
+
+
+extractEmission :: [Action] -> Emission
+extractEmission x=[]
+
+distributePhoton :: Absorption -> SharedWorld -> IO SharedWorld
+distributePhoton a w=return w
+
+execAction :: SharedWorld -> (ThreadId,Action) -> IO SharedWorld
+execAction w _=return w
 
 -- | modify world at 10 ms tick
-processAction :: Chan Action -> SharedWorld -> IO ()
-processAction ch w=do
+processAction :: Chan (ThreadId,Action) -> M.Map ThreadId V.Vec3I -> SharedWorld -> IO ()
+processAction ch tm w=do
     t_tick<-getCurrentTime
     acs<-readChanAll ch
-    let
-        (w',rs)=mapAccumL (flip commitAction) w acs
-        (acs',fs)=partitionEithers rs
-    mapM_ finishResult fs
-    mapM_ (writeChan ch) acs'
     
+    let (w',absorption)=stepLight (extractEmission $ map snd acs) w
+    w''<-distributePhoton absorption w'
+    w'''<-foldM execAction w'' acs
+    let (w'''',rmap)=moveBiParticles 0.01 w'''
+    let tm'=M.union (M.fromList rmap) tm
+    
+    -- adjust tick duration
     t_now<-getCurrentTime
     let t_elapsed=realToFrac (t_now `diffUTCTime` t_tick)
     threadDelay $ max 0 $ floor $ 1e6*(10e-3-t_elapsed)
-    processAction ch w'
+    processAction ch tm' w''''
 
-
+createWorld :: BiParticleIO () -> IO ()
+createWorld f=do
+    ch<-newChan
+    tid<-forkIO $ runReaderT f ch
+    let bs=BiParticleS (V.Vec3F 0 0 0) (V.Vec3F 0 0 0) identityQD (V.Vec3F 0 0 0) []
+    let w=SharedWorld (M.fromList [(V.Vec3I 0 0 0,[BiParticle bs tid])]) M.empty
+    processAction ch (M.fromList [(tid,V.Vec3I 0 0 0)]) w
 
 -- | read all currently available values from a Chan in FIFO order. Other thread mustn't read.
 readChanAll :: Chan a -> IO [a]
@@ -187,9 +216,32 @@ readChanAll ch=aux []
 
 
 
+mmFromList :: Ord k => [(k,a)] -> M.Map k [a]
+mmFromList=foldl' (\m (k,v)->M.insertWith (++) k [v] m) M.empty
 
--- | Stationary frame
+mmUpdate :: Ord k => ((k,a)->(k,a)) -> M.Map k [a] -> M.Map k [a]
+mmUpdate f m=mmFromList $ concatMap (\(i,xs)->map (curry f i) xs) $ M.assocs m
+
+mmInsert :: Ord k => k -> a -> M.Map k [a] -> M.Map k [a]
+mmInsert k v=M.insertWith (++) k [v]
+
+mmAssocs :: Ord k => M.Map k [a] -> [(k,a)]
+mmAssocs=concatMap (\(k,vs)->map (k,) vs) . M.assocs
+
+
+
+-- | decompose coordinate into cell index and displacement
+decomposePos :: V.Vec3F -> (V.Vec3I,V.Vec3F)
+decomposePos p=(pi,p-V.map fromIntegral pi)
+    where pi=V.map round p
+
+
+-- | semi-stationary frame
 data Frame=Frame !V.Vec3D !QD deriving(Show)
+
+identityFrame :: Frame
+identityFrame=Frame (V.Vec3D 0 0 0) identityQD
+
 
 -- | Quaternion Double
 data QD=QD !V.Vec3D !Double deriving(Show,Eq)
@@ -201,6 +253,9 @@ instance Num QD where
     abs=undefined
     signum=undefined
     fromInteger=undefined
+
+identityQD :: QD
+identityQD=QD (V.Vec3D 0 0 0) 1
 
 cross3D v0 v1=V.pack $ V.unpack v0 `V.cross` V.unpack v1
 
@@ -222,7 +277,4 @@ frame_to_world (Frame trans rot) pos=trans+rotateVQ rot pos
 
 compose_frame :: Frame -> Frame -> Frame
 compose_frame (Frame t0 r0) (Frame t1 r1)=Frame (t0+rotateVQ r0 t1) (r0*r1)
-
-identityFrame :: Frame
-identityFrame=Frame (V.Vec3D 0 0 0) (QD (V.Vec3D 0 0 0) 1)
 

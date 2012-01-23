@@ -188,12 +188,9 @@ translateCC MoveDown=V.Vec3D 0 0 (-0.8)
 reshapeCB (Size w h)=do
     G.viewport G.$= (G.Position 0 0,G.Size (fromIntegral w) (fromIntegral h))
 
-data PlayState
-    =Stop
-    |Play
 
 disp :: ViewerState -> (Frame,SharedWorld) -> IO ()
-disp vs (fr,SharedWorld m)=do
+disp vs (fr,SharedWorld mc ml)=do
     -- frame-global configuration
     clearDepth $= 1
     G.clear [G.DepthBuffer,G.ColorBuffer]
@@ -205,7 +202,7 @@ disp vs (fr,SharedWorld m)=do
     -- render
     let
         ViewerState pcam _ _ _=vs
-        ps=map (V.map fromIntegral *** id) $ M.assocs m :: [(V.Vec3D,World.RGBA)]
+        ps=map (V.map fromIntegral *** id) $ M.assocs mc :: [(V.Vec3D,World.RGBA)]
     withVS vs $ G.renderPrimitive Triangles $
         mapM_ (uncurry $ renderPoint pcam) $ sortBy (comparing (\x-> - V.norm (fst x-pcam))) ps
             
