@@ -4,9 +4,9 @@
 -- why "biparticle"?
 --
 -- externally viewed (i.e. from our world), it's a piece of program that somehow
--- connectsto vishnu and pull information out.
+-- connects to vishnu and pull information out.
 --
--- internally viewed (i.e. from vishnu), it's a particle that somehow "decides" its own behavior.
+-- internally viewed (i.e. from vishnu), it's a particle that somehow "decides" on its own behavior.
 --
 -- So the same thing can be viewed as a particle from both sides, thus the name bi-particle.
 --
@@ -15,6 +15,7 @@ import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
+import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader
@@ -25,10 +26,9 @@ import qualified Data.Vec as V
 import qualified Data.Map as M
 import Data.Time.Clock
 import System.IO
+import System.Random
 import System.Environment
 import Text.Printf
-
-
 
 
 -- | BiParticleIO defines external behavior of BiParticle
@@ -58,10 +58,10 @@ emit_photon :: (V.Vec3D,PhotonType) -> BiParticleIO ()
 emit_photon ph=requestAction $ EmitPhoton $ first (V.map realToFrac) ph
 
 -- | Get all previously absorbed photons and empty the photon accumulator.
-exchange_photon :: BiParticleIO [(V.Vec3D,PhotonType)]
-exchange_photon=do
+get_photon :: BiParticleIO [(V.Vec3D,PhotonType)]
+get_photon=do
     mv<-liftIO $ newEmptyMVar
-    requestAction $ ExchangePhoton mv
+    requestAction $ GetPhoton mv
     liftM (map $ first $ V.map realToFrac) $ liftIO $ readMVar mv
 
 -- | Set velocity and keep it until further call to this function.
@@ -72,7 +72,7 @@ set_velocity v=requestAction $ SetVelocity $ V.map realToFrac v
 set_rotation :: V.Vec3D -> BiParticleIO ()
 set_rotation r=requestAction $ SetRotation $ V.map realToFrac r
 
--- | Spawn new TransParticle that shares current position and velocity
+-- | Spawn new 'BiParticle' that shares current position. velocity will be 0.
 spawn :: BiParticleIO () -> BiParticleIO ()
 spawn f=requestAction $ Spawn f
 
@@ -145,11 +145,11 @@ propagatePhoton (pos,Photon dir fpos col)=(pos+pi',Photon dir pf' col)
 
 data Action
     =EmitPhoton (V.Vec3F,PhotonType)
-    |ExchangePhoton (MVar [(V.Vec3F,PhotonType)])
+    |GetPhoton (MVar [(V.Vec3F,PhotonType)])
     |SetVelocity V.Vec3F
     |SetRotation V.Vec3F
     |Spawn (BiParticleIO ())
-
+    |Die
 
 
 
@@ -170,14 +170,55 @@ moveBiParticle dt (BiParticle (BiParticleS p p' o o' ps) tid)=
         on=o -- TODO: rotate o by dt*o'
 
 
-extractEmission :: [Action] -> Emission
-extractEmission x=[]
+extractEmission :: M.Map ThreadId V.Vec3I -> [(ThreadId,Action)] -> IO Emission
+extractEmission tm=sequence . mapMaybe f
+    where
+        f (ti,EmitPhoton (dir,ty))=Just $ do
+            fpos<-liftM3 V.Vec3F randomNIO randomNIO randomNIO
+            return (tm M.! ti,Photon dir fpos ty)
+        f _=Nothing
 
 distributePhoton :: Absorption -> SharedWorld -> IO SharedWorld
-distributePhoton a w=return w
+distributePhoton=flip $ foldM f
+    where
+        f (SharedWorld pas phs) (ix,Photon dir _ ty)=do
+            let ps=pas M.! ix
+            let addPhoton (BiParticle (BiParticleS p p' o o' ps) ti)=BiParticle (BiParticleS p p' o o' ((dir,ty):ps)) ti
+            i<-randomRIO (0,length ps-1)
+            let ps'=map (\(p0,i0)->if i0/=i then p0 else addPhoton p0) $ zip ps [0..]
+            let pas'=M.insert ix ps' pas
+            return $ SharedWorld pas' phs
 
-execAction :: SharedWorld -> (ThreadId,Action) -> IO SharedWorld
-execAction w _=return w
+execAction
+    :: Chan (ThreadId,Action)
+    -> (SharedWorld,M.Map ThreadId V.Vec3I)
+    -> (ThreadId,Action)
+    -> IO (SharedWorld,M.Map ThreadId V.Vec3I)
+execAction ch tp@((SharedWorld pas phs),tm) (ti,ac)=case ac of
+    EmitPhoton _ -> return tp
+    GetPhoton mv -> do
+        sc<-tryPutMVar mv photons
+        unless sc $ undefined "execAction: MVar already occupied"
+        let bp=BiParticle (BiParticleS p p' o o' []) ti
+        return (SharedWorld (mmInsert ix bp pas') phs,tm)
+    SetVelocity np' -> do
+        let bp=BiParticle (BiParticleS p np' o o' photons) ti
+        return (SharedWorld (mmInsert ix bp pas') phs,tm)
+    SetRotation no' -> do
+        let bp=BiParticle (BiParticleS p p' o no' photons) ti
+        return (SharedWorld (mmInsert ix bp pas') phs,tm)
+    Spawn f -> do
+        tid<-forkIO $ runReaderT f ch `finally` (myThreadId >>= writeChan ch . (,Die))
+        let bs=BiParticleS p (V.Vec3F 0 0 0) o (V.Vec3F 0 0 0) []
+        let bp=BiParticle bs tid
+        return (SharedWorld (mmInsert ix bp pas) phs,M.insert tid ix tm)
+    Die -> do
+        return (SharedWorld pas' phs,M.delete ti tm)
+    where
+        pas'=mmFilterAt (\(BiParticle _ i)->i/=ti) ix pas
+        ([BiParticle (BiParticleS p p' o o' photons) _],ps)=
+            partition (\(BiParticle _ i)->i==ti) $ M.findWithDefault [] ix pas
+        ix=tm M.! ti
 
 -- | modify world at 10 ms tick
 processAction :: Chan (ThreadId,Action) -> M.Map ThreadId V.Vec3I -> SharedWorld -> IO ()
@@ -185,22 +226,25 @@ processAction ch tm w=do
     t_tick<-getCurrentTime
     acs<-readChanAll ch
     
-    let (w',absorption)=stepLight (extractEmission $ map snd acs) w
+    -- commit all actions & tick world
+    emission<-extractEmission tm acs
+    let (w',absorption)=stepLight emission w
     w''<-distributePhoton absorption w'
-    w'''<-foldM execAction w'' acs
+    (w''',tm')<-foldM (execAction ch) (w'',tm) acs
     let (w'''',rmap)=moveBiParticles 0.01 w'''
-    let tm'=M.union (M.fromList rmap) tm
+    let tm''=M.union (M.fromList rmap) tm'
     
     -- adjust tick duration
     t_now<-getCurrentTime
     let t_elapsed=realToFrac (t_now `diffUTCTime` t_tick)
     threadDelay $ max 0 $ floor $ 1e6*(10e-3-t_elapsed)
-    processAction ch tm' w''''
+    
+    unless (M.null tm'') $ processAction ch tm'' w''''
 
 createWorld :: BiParticleIO () -> IO ()
 createWorld f=do
     ch<-newChan
-    tid<-forkIO $ runReaderT f ch
+    tid<-forkIO $ runReaderT f ch `finally` (myThreadId >>= writeChan ch . (,Die))
     let bs=BiParticleS (V.Vec3F 0 0 0) (V.Vec3F 0 0 0) identityQD (V.Vec3F 0 0 0) []
     let w=SharedWorld (M.fromList [(V.Vec3I 0 0 0,[BiParticle bs tid])]) M.empty
     processAction ch (M.fromList [(tid,V.Vec3I 0 0 0)]) w
@@ -213,11 +257,23 @@ readChanAll ch=aux []
             e<-isEmptyChan ch
             if e then return (reverse xs) else readChan ch >>= (aux . (:xs))
 
-
-
+-- | Sample from the normal distribution
+randomNIO :: IO Float
+randomNIO=do
+    u<-randomRIO (0,1)
+    v<-randomRIO (0,1)
+    return $ sqrt (-2*log(u)) * cos (2*pi*v)
 
 mmFromList :: Ord k => [(k,a)] -> M.Map k [a]
 mmFromList=foldl' (\m (k,v)->M.insertWith (++) k [v] m) M.empty
+
+mmFilterAt :: Ord k => (a -> Bool) -> k -> M.Map k [a] -> M.Map k [a]
+mmFilterAt f k m=M.update update k m
+    where
+        update xs
+            |null xs' = Nothing
+            |otherwise = Just xs'
+            where xs'=filter f xs
 
 mmUpdate :: Ord k => ((k,a)->(k,a)) -> M.Map k [a] -> M.Map k [a]
 mmUpdate f m=mmFromList $ concatMap (\(i,xs)->map (curry f i) xs) $ M.assocs m
