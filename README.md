@@ -1,5 +1,11 @@
 multi-view 3d playground
 
+compilation
+-----
+    cabal configure
+    cabal build
+    cabal install
+
 vishnu executable
 -----
 

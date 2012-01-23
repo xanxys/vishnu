@@ -1,0 +1,23 @@
+Name:            vishnu
+Cabal-Version:   >=1.2
+Version:         0.1
+Author:          xanxys
+Maintainer:      xanxys@gmail.com
+Synopsis:        3d playground
+Build-Type:      Simple
+License:         BSD3
+Category:       Application System Graphics Sound
+Description:
+ 3d playground (TODO: write more)
+
+Executable vishnu
+    Main-is: Main.hs
+    Extensions: ForeignFunctionInterface
+    GHC-Options: -threaded
+    Build-depends:
+        base>=3 && <5, bytestring,  containers>=0.4, Vec>=0.9, transformers>=0.2, 
+        network>=2.3, msgpack>=0.7, peggy>=0.3, attoparsec>=0.10,
+        attoparsec-conduit, conduit>=0.0.3,
+        time>=1.2, unix>=2.4,
+        gtk>=0.10,OpenGL>=2.2.3, GLUT>=2.1
+
