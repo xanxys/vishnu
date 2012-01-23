@@ -31,7 +31,7 @@ import System.Environment
 import Text.Printf
 
 
--- | BiParticleIO defines external behavior of BiParticle
+-- | 'BiParticleIO' defines external behavior of 'BiParticle'
 --
 -- Definition of BiParticle:
 -- external -> internal:
@@ -43,13 +43,13 @@ import Text.Printf
 --
 -- However, there are multiple way to expose this model in real programming language.
 -- Here, we define stateful accumulative interface.
---  * exchange_photon
+--  * get_photon
 --  * set_velocity
 --  * set_rotation
 --  * spawn
 --
--- set_velocity and set_rotation are separated merely for convenience, and each TransPariticle
--- should maintain them on their own if needed.
+-- set_velocity and set_rotation are separated merely for convenience, and each BiPariticle
+-- should keep the values on their own if needed.
 -- 
 type BiParticleIO a=ReaderT (Chan (ThreadId,Action)) IO a
 
@@ -100,7 +100,7 @@ data Photon=Photon
     V.Vec3F -- ^ fractional coordinate [-0.5,0.5]^3
     PhotonType -- ^ color of photon
 
--- | Color of photon is discretized. And there's no such concept as wavelength;
+-- | Color of photon is discretized. And there's no such concept as wavelength,
 -- since vishnu is based on geometric optics.
 data PhotonType=Red|Green|Blue
 
@@ -198,7 +198,7 @@ execAction ch tp@((SharedWorld pas phs),tm) (ti,ac)=case ac of
     EmitPhoton _ -> return tp
     GetPhoton mv -> do
         sc<-tryPutMVar mv photons
-        unless sc $ undefined "execAction: MVar already occupied"
+        unless sc $ error "execAction: MVar already occupied"
         let bp=BiParticle (BiParticleS p p' o o' []) ti
         return (SharedWorld (mmInsert ix bp pas') phs,tm)
     SetVelocity np' -> do
