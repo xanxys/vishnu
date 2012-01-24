@@ -102,7 +102,7 @@ data Photon=Photon
 
 -- | Color of photon is discretized. And there's no such concept as wavelength,
 -- since vishnu is based on geometric optics.
-data PhotonType=Red|Green|Blue
+data PhotonType=Red|Green|Blue deriving(Eq,Show)
 
 
 

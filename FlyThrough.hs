@@ -18,19 +18,18 @@ import qualified Data.Set as S
 import qualified Data.Vec as V
 import Graphics.UI.GLUT
 import Graphics.Rendering.OpenGL as G
-import System.Posix.Process
 import World
 
 -- | 
-flyThroughView :: ViewIO ()
+flyThroughView :: BiParticleIO ()
 flyThroughView=safeTrampoline $ \cvc->do
     getArgsAndInitialize
     
     -- embed view in display w/ window
     w<-createWindow "vishnu: fly view"
-    reshapeCallback $= Just reshapeCB    
+    reshapeCallback $= Just reshapeCB
     actionOnWindowClose $= MainLoopReturns
-        
+    
     -- register key event handler to track ContinuousCommand, enter/leave and exit
     foc<-newIORef False
     ccs<-newIORef S.empty
@@ -39,7 +38,7 @@ flyThroughView=safeTrampoline $ \cvc->do
     -- register mouse event handler to track view orientation change
     dp<-newIORef (0,0)
     passiveMotionCallback $= Just (handleMotion dp foc)
-
+    
     -- create viewer
     vs<-newIORef (ViewerState (V.Vec3D 0 0 0) (V.Vec3D 0 0 0) 0 0)
     ve<-forkIO $ forever $ do
@@ -51,11 +50,15 @@ flyThroughView=safeTrampoline $ \cvc->do
     
     -- init draw
     t0<-getCurrentTime
+    ss<-newMVar []
     let rFrame=do
             threadDelay $ 20*1000
             vs0<-readIORef vs
             cv0<-takeMVar cvc
-            disp vs0 cv0
+            samples<-takeMVar ss
+            let samples'=evolveSamples $ map (\(d,t)->(1,d,t)) cv0++samples
+            putMVar ss samples'
+            render samples'
         
     G.texture G.Texture2D G.$= G.Enabled
     mkTexture >>= bindTexture
@@ -65,6 +68,9 @@ flyThroughView=safeTrampoline $ \cvc->do
     
     -- deallocate
     killThread ve
+
+
+
 
 bindTexture t=textureBinding Texture2D $= Just t
 
@@ -98,7 +104,7 @@ mkTexture=do
 	
 
 -- | utility function to ensure f is executed in separate OS thread.
-safeTrampoline :: (MVar (Frame,SharedWorld) -> IO ()) -> ViewIO ()
+safeTrampoline :: (MVar [(V.Vec3D,PhotonType)] -> IO ()) -> BiParticleIO ()
 safeTrampoline f=do
     (cvc,mv)<-liftIO $ do
         cvc<-newEmptyMVar
@@ -107,10 +113,10 @@ safeTrampoline f=do
         return (cvc,mv)
     
     let
-        iter :: ViewIO ()
+        iter :: BiParticleIO ()
         iter=do
             x<-liftIO $ tryTakeMVar mv
-            when (isNothing x) $ unsafePeek >>= (\x->liftIO $ tryPutMVar cvc x) >> iter
+            when (isNothing x) $ get_photon >>= (\x->liftIO $ tryPutMVar cvc x) >> iter
     
     iter
 
@@ -159,6 +165,7 @@ evolveVS dt ccs (dx,dy) (ViewerState trans trans' pitch yaw)=ViewerState ntrans 
         trans_cc''=applyRotation $ sum $ map translateCC (S.toList ccs)
         applyRotation=rotateV (V.Vec3D 0 0 1) (-yaw)
 
+
 -- | rotate given vector by axis and angle
 rotateV :: V.Vec3D -> Double -> V.Vec3D -> V.Vec3D
 rotateV axis theta v=projv + V.map (*(cos theta)) perpv + V.map (*(sin theta)) ppv
@@ -182,66 +189,51 @@ translateCC MoveUp=V.Vec3D 0 0 0.8
 translateCC MoveDown=V.Vec3D 0 0 (-0.8)
 
 
-
-
-
 reshapeCB (Size w h)=do
     G.viewport G.$= (G.Position 0 0,G.Size (fromIntegral w) (fromIntegral h))
 
+evolveSamples :: [(Double,V.Vec3D,PhotonType)] -> [(Double,V.Vec3D,PhotonType)]
+evolveSamples=filter large . map f
+    where
+        f (w,d,ty)=(w*0.9,d,ty)
+        large (w,_,_)=w>0.01
 
-disp :: ViewerState -> (Frame,SharedWorld) -> IO ()
-disp vs (fr,SharedWorld mc ml)=do
+-- | map photons onto plane as panorama
+render :: [(Double,V.Vec3D,PhotonType)] -> IO ()
+render samples=do
     -- frame-global configuration
     clearDepth $= 1
     G.clear [G.DepthBuffer,G.ColorBuffer]
     
     G.depthFunc G.$= Just G.Always
     G.blend G.$= G.Enabled
-    G.blendFunc G.$= (G.SrcAlpha,G.OneMinusSrcAlpha)
+    G.blendFunc G.$= (G.SrcAlpha,G.One) -- MinusSrcAlpha)
 
     -- render
-    let
-        ViewerState pcam _ _ _=vs
-        ps=map (V.map fromIntegral *** id) $ M.assocs mc :: [(V.Vec3D,World.RGBA)]
-    withVS vs $ G.renderPrimitive Triangles $
-        mapM_ (uncurry $ renderPoint pcam) $ sortBy (comparing (\x-> - V.norm (fst x-pcam))) ps
-            
-        
+    G.renderPrimitive Triangles $ mapM_ renderSample samples
+    
     -- end frame
     swapBuffers
 
-
--- | convert action in frame-coordinate to viewer-coordinate
-withVS :: ViewerState -> IO a -> IO a
-withVS (ViewerState (V.Vec3D tx ty tz) _ pitch yaw) f=G.preservingMatrix $ do
-        G.frustum (-1) 1 (-1) 1 1 100
-        G.rotate (-90::Double) (G.Vector3 1 0 0)
-        G.rotate (180/pi*pitch) (G.Vector3 1 0 0)
-        G.rotate (180/pi*yaw) (G.Vector3 0 0 1)
-        G.translate $ G.Vector3 (-tx) (-ty) (-tz)
-        f
-
-
-renderPoint :: V.Vec3D -> V.Vec3D -> World.RGBA -> IO ()
-renderPoint pcam pt (World.RGBA r g b a)=do
-    G.color $ G.Color4 r g b a
-    pointTriangle pt pcam 4
-
-pointTriangle :: V.Vec3D -> V.Vec3D -> Double -> IO ()
-pointTriangle p q sigma=pt 1 0 >> pt (-0.5) 0.87 >> pt (-0.5) (-0.87)
+renderSample :: (Double,V.Vec3D,PhotonType) -> IO ()
+renderSample (w,dir,ty)=do
+    G.color $ toColor w ty
+    pt 1 0 >> pt (-0.5) 0.87 >> pt (-0.5) (-0.87)
     where
         pt s t=do
             G.texCoord $ G.TexCoord2 s t
-            G.vertex $ v2v $ p + V.map (*(s*sigma)) eS + V.map (*(t*sigma)) eT
+            G.vertex $ v2v $ p0 + V.map (*(s*sigma)) eS + V.map (*(t*sigma)) eT
         
-        n=normalize $ q-p
-        eS=normalize $ (V.Vec3D 1 0 0) `cross3D` n
-        eT=n `cross3D` eS
+        sigma=1
+        eS=(V.Vec3D 1 0 0)
+        eT=(V.Vec3D 0 1 0)
         
-        normalize v=let k=1/V.norm v in V.map (*k) v
-        
+        p0=project dir
+        project (V.Vec3D dx dy dz)=V.Vec3D (0.2*asin dz) (0.2*atan2 dy dx) 0
 
-
+toColor w World.Red=G.Color4 1 0 0 w
+toColor w World.Green=G.Color4 0 1 0 w
+toColor w World.Blue=G.Color4 0 0 1 w
 
 v2v (V.Vec3D x y z)=G.Vertex3 x y z
 
