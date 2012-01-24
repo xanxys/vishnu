@@ -18,6 +18,9 @@ so all views are equal in their privillege.
 Future direction is to add sound and light propagation and implement in symmetrical P2P
 (i.e. no single node holds complete world structure, yet as a network they represent a single world.)
 
+example (not working)
+    spawn fly
+    light
 
 VsThin
 -----

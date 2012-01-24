@@ -229,7 +229,7 @@ renderSample (w,dir,ty)=do
         eT=(V.Vec3D 0 1 0)
         
         p0=project dir
-        project (V.Vec3D dx dy dz)=V.Vec3D (0.2*asin dz) (0.2*atan2 dy dx) 0
+        project (V.Vec3D dx dy dz)=V.Vec3D ((0.5*pi+asin dz)/(2*pi)) ((pi+atan2 dy dx)/(2*pi)) 0
 
 toColor w World.Red=G.Color4 1 0 0 w
 toColor w World.Green=G.Color4 0 1 0 w

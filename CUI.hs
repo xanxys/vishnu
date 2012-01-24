@@ -23,7 +23,7 @@ cuiIter=do
 light ix=do
     set_velocity $ if ix<100
         then V.Vec3D 1 0 0
-        else V.Vec3D (cos $ 0.01*fromIntegral ix) (sin $ 0.01*fromIntegral ix) 0
+        else let t=0.01*fromIntegral (ix-100) in V.Vec3D ((-1)*omega*sin(omega*t)) (1*omega*cos(omega*t)) 0
     
     x<-liftIO $ randomRIO (-1,1)
     y<-liftIO $ randomRIO (-1,1)
@@ -35,6 +35,7 @@ light ix=do
     emit_photon (v0,Red)
     liftIO $ threadDelay $ 10*1000
     light $ ix+1
+    where omega=2*pi
 
 -- | parse and run command
 cuiProcess ["light"]=do
