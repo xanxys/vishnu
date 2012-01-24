@@ -22,9 +22,20 @@ cuiIter=do
 
 light ix=do
     set_velocity $ if ix<100
-        then V.Vec3D 1 0 0
-        else let t=0.01*fromIntegral (ix-100) in V.Vec3D ((-1)*omega*sin(omega*t)) (1*omega*cos(omega*t)) 0
+        then V.Vec3D 0 0 0
+        else V.Vec3D 0 0 0 --let t=0.01*fromIntegral (ix-100) in V.Vec3D ((-1)*omega*sin(omega*t)) (1*omega*cos(omega*t)) 0
     
+    emit_random Red
+    emit_random Red
+    emit_random Green
+    emit_random Blue
+    
+    liftIO $ threadDelay $ 10*1000
+    light $ ix+1
+    where omega=2*pi
+
+emit_random :: PhotonType -> BiParticleIO ()
+emit_random ty=do
     x<-liftIO $ randomRIO (-1,1)
     y<-liftIO $ randomRIO (-1,1)
     z<-liftIO $ randomRIO (-1,1)
@@ -32,10 +43,7 @@ light ix=do
         v=V.Vec3D x y z
         v0=V.map (/(V.norm v)) v
     
-    emit_photon (v0,Red)
-    liftIO $ threadDelay $ 10*1000
-    light $ ix+1
-    where omega=2*pi
+    emit_photon (v0,ty)
 
 -- | parse and run command
 cuiProcess ["light"]=do

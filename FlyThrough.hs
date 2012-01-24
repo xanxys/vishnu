@@ -188,9 +188,12 @@ translateCC MoveBackward=V.Vec3D 0 (-1) 0
 translateCC MoveUp=V.Vec3D 0 0 0.8
 translateCC MoveDown=V.Vec3D 0 0 (-0.8)
 
-
-reshapeCB (Size w h)=do
-    G.viewport G.$= (G.Position 0 0,G.Size (fromIntegral w) (fromIntegral h))
+-- | assign [-1,1]^2 to 2:1 frame
+reshapeCB (Size w h)
+    |w'>h'*2    = G.viewport G.$= (G.Position ((w'-h'*2) `div` 2) 0,G.Size (h'*2) h')
+    |otherwise = G.viewport G.$= (G.Position 0 ((h'-w' `div` 2) `div` 2),G.Size w' (w' `div` 2))
+    where
+        [w',h']=map fromIntegral [w,h]
 
 evolveSamples :: [(Double,V.Vec3D,PhotonType)] -> [(Double,V.Vec3D,PhotonType)]
 evolveSamples=filter large . map f
@@ -215,6 +218,7 @@ render samples=do
     -- end frame
     swapBuffers
 
+-- | 
 renderSample :: (Double,V.Vec3D,PhotonType) -> IO ()
 renderSample (w,dir,ty)=do
     G.color $ toColor w ty
@@ -222,14 +226,12 @@ renderSample (w,dir,ty)=do
     where
         pt s t=do
             G.texCoord $ G.TexCoord2 s t
-            G.vertex $ v2v $ p0 + V.map (*(s*sigma)) eS + V.map (*(t*sigma)) eT
+            G.vertex $ v2v $ p0 + V.map (*sigma) (V.Vec3D (s*0.5) t 0) -- TODO: calculate Jacobian
         
         sigma=1
-        eS=(V.Vec3D 1 0 0)
-        eT=(V.Vec3D 0 1 0)
         
         p0=project dir
-        project (V.Vec3D dx dy dz)=V.Vec3D ((0.5*pi+asin dz)/(2*pi)) ((pi+atan2 dy dx)/(2*pi)) 0
+        project (V.Vec3D dx dy dz)=V.Vec3D (atan2 (-dx) (-dy) / pi) (2 * asin dz / pi) 0
 
 toColor w World.Red=G.Color4 1 0 0 w
 toColor w World.Green=G.Color4 0 1 0 w

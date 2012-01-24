@@ -99,6 +99,7 @@ data Photon=Photon
     V.Vec3F -- ^ direction
     V.Vec3F -- ^ fractional coordinate [-0.5,0.5]^3
     PhotonType -- ^ color of photon
+    deriving(Show)
 
 -- | Color of photon is discretized. And there's no such concept as wavelength,
 -- since vishnu is based on geometric optics.
@@ -175,7 +176,7 @@ extractEmission tm=sequence . mapMaybe f
     where
         f (ti,EmitPhoton (dir,ty))=Just $ do
             fpos<-liftM3 V.Vec3F randomNIO randomNIO randomNIO
-            return (tm M.! ti,Photon dir fpos ty)
+            return (tm M.! ti,Photon dir fpos ty) -- TODO: out of cell photons?
         f _=Nothing
 
 distributePhoton :: Absorption -> SharedWorld -> IO SharedWorld
