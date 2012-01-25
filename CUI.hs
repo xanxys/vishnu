@@ -22,7 +22,7 @@ cuiIter=do
 
 light ix=do
     set_velocity $ if ix<100
-        then V.Vec3D 0 0 0
+        then V.Vec3D 0 1.5 0
         else V.Vec3D 0 0 0 --let t=0.01*fromIntegral (ix-100) in V.Vec3D ((-1)*omega*sin(omega*t)) (1*omega*cos(omega*t)) 0
     
     emit_random Red

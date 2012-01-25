@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections, TypeSynonymInstances #-}
 -- | expose world via 'BiParticle'
 --
 -- why "biparticle"?
@@ -84,16 +84,18 @@ requestAction a=do
 
 -- | shared model is incorrect, but a reasonable approximation.
 --
-data SharedWorld=SharedWorld (M.Map V.Vec3I [BiParticle]) (M.Map V.Vec3I [Photon])
+data SharedWorld=SharedWorld (M.Map V.Vec3I [BiParticle]) (M.Map V.Vec3I [Photon]) deriving(Show)
 
-data BiParticle=BiParticle BiParticleS ThreadId
+data BiParticle=BiParticle BiParticleS ThreadId deriving(Show)
 
 data BiParticleS=BiParticleS
-    !V.Vec3F -- ^ fractional position (internal)
-    !V.Vec3F -- ^ velocity (external, used for interfacing)
-    !QD -- ^ orientation (internal)
-    !V.Vec3F -- ^ angular velocity (external)
-    [(V.Vec3F,PhotonType)] -- ^ absorbed photons
+    {p :: !V.Vec3F -- ^ fractional position (internal)
+    ,p' :: !V.Vec3F -- ^ velocity (external, used for interfacing)
+    ,o :: !QD -- ^ orientation (internal)
+    ,o' :: !V.Vec3F -- ^ angular velocity (external)
+    ,photons :: [(V.Vec3F,PhotonType)] -- ^ absorbed photons
+    }
+    deriving(Show)
 
 data Photon=Photon
     V.Vec3F -- ^ direction
@@ -105,15 +107,23 @@ data Photon=Photon
 -- since vishnu is based on geometric optics.
 data PhotonType=Red|Green|Blue deriving(Eq,Show)
 
+instance Show V.Vec3I where
+    show (V.Vec3I x y z)=printf "(%d,%d,%d)" x y z
 
+instance Show V.Vec3F where
+    show (V.Vec3F x y z)=printf "(%f,%f,%f)" x y z
+
+instance Show V.Vec3D where
+    show (V.Vec3D x y z)=printf "(%f,%f,%f)" x y z
 
 
 
 type Absorption=[(V.Vec3I,Photon)]
 type Emission=[(V.Vec3I,Photon)]
 
+-- you must emit photons before propagation to prevent absorbing just-emitted photons 
 stepLight :: Emission -> SharedWorld -> (SharedWorld,Absorption)
-stepLight emission=(first $ emitLight emission) . (first propagateLight) . absorbLight
+stepLight emission= (first propagateLight) . (first $ emitLight emission) . absorbLight
 
 absorbLight :: SharedWorld -> (SharedWorld,Absorption)
 absorbLight (SharedWorld pas phs)=(SharedWorld pas phs',mmAssocs dphs)
@@ -184,7 +194,8 @@ distributePhoton=flip $ foldM f
     where
         f (SharedWorld pas phs) (ix,Photon dir _ ty)=do
             let ps=pas M.! ix
-            let addPhoton (BiParticle (BiParticleS p p' o o' ps) ti)=BiParticle (BiParticleS p p' o o' ((dir,ty):ps)) ti
+            let addPhoton (BiParticle bps ti)=BiParticle bps{photons=(dir,ty):photons bps} ti
+            when (null ps) $ error "distributePhoton: nowhere to go"
             i<-randomRIO (0,length ps-1)
             let ps'=map (\(p0,i0)->if i0/=i then p0 else addPhoton p0) $ zip ps [0..]
             let pas'=M.insert ix ps' pas
@@ -198,26 +209,26 @@ execAction
 execAction ch tp@((SharedWorld pas phs),tm) (ti,ac)=case ac of
     EmitPhoton _ -> return tp
     GetPhoton mv -> do
-        sc<-tryPutMVar mv photons
+        sc<-tryPutMVar mv (photons bps)
         unless sc $ error "execAction: MVar already occupied"
-        let bp=BiParticle (BiParticleS p p' o o' []) ti
+        let bp=BiParticle bps{photons=[]} ti
         return (SharedWorld (mmInsert ix bp pas') phs,tm)
     SetVelocity np' -> do
-        let bp=BiParticle (BiParticleS p np' o o' photons) ti
+        let bp=BiParticle bps{p'=np'} ti
         return (SharedWorld (mmInsert ix bp pas') phs,tm)
     SetRotation no' -> do
-        let bp=BiParticle (BiParticleS p p' o no' photons) ti
+        let bp=BiParticle bps{o'=no'} ti
         return (SharedWorld (mmInsert ix bp pas') phs,tm)
     Spawn f -> do
         tid<-forkIO $ runReaderT f ch `finally` (myThreadId >>= writeChan ch . (,Die))
-        let bs=BiParticleS p (V.Vec3F 0 0 0) o (V.Vec3F 0 0 0) []
+        let bs=BiParticleS (p bps) (V.Vec3F 0 0 0) (o bps) (V.Vec3F 0 0 0) []
         let bp=BiParticle bs tid
         return (SharedWorld (mmInsert ix bp pas) phs,M.insert tid ix tm)
     Die -> do
         return (SharedWorld pas' phs,M.delete ti tm)
     where
         pas'=mmFilterAt (\(BiParticle _ i)->i/=ti) ix pas
-        ([BiParticle (BiParticleS p p' o o' photons) _],ps)=
+        ([BiParticle bps _],ps)=
             partition (\(BiParticle _ i)->i==ti) $ M.findWithDefault [] ix pas
         ix=tm M.! ti
 
