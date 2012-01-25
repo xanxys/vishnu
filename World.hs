@@ -136,7 +136,7 @@ propagateLight :: SharedWorld -> SharedWorld
 propagateLight (SharedWorld pas phs)=SharedWorld pas phs'
     where
         phs'=M.filterWithKey (const . keepIndex) $ mmUpdate propagatePhoton phs
-        keepIndex v=V.normSq v<500^2
+        keepIndex v=V.normSq v<100^2
 
 
 emitLight :: Emission -> SharedWorld -> SharedWorld
@@ -181,12 +181,14 @@ moveBiParticle dt (BiParticle (BiParticleS p p' o o' ps) tid)=
         on=o -- TODO: rotate o by dt*o'
 
 
+--  TODO: when  ipos/=(0,0,0), that photon might be captured by emitter. is this OK?
+-- we need more clear semantics regarding photon.
 extractEmission :: M.Map ThreadId V.Vec3I -> [(ThreadId,Action)] -> IO Emission
 extractEmission tm=sequence . mapMaybe f
     where
         f (ti,EmitPhoton (dir,ty))=Just $ do
-            fpos<-liftM3 V.Vec3F randomNIO randomNIO randomNIO
-            return (tm M.! ti,Photon dir fpos ty) -- TODO: out of cell photons?
+            (ipos,fpos)<-liftM decomposePos $ liftM3 V.Vec3F randomNIO randomNIO randomNIO
+            return (tm M.! ti+ipos,Photon dir fpos ty)
         f _=Nothing
 
 distributePhoton :: Absorption -> SharedWorld -> IO SharedWorld

@@ -235,7 +235,7 @@ renderSample (w,dir,ty)=do
         sx=sigma*0.5/sin theta
         sy=sigma*1
         
-        sigma=1
+        sigma=2
         (theta,phi)=directionInSpherical $ negate dir
 
 -- | Convert unit vector in cartesian coordinates to spherical coordinates (theta,phi)

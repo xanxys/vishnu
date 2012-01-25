@@ -30,6 +30,8 @@ light ix=do
     emit_random Green
     emit_random Blue
     
+    get_photon -- throw away
+    
     liftIO $ threadDelay $ 10*1000
     light $ ix+1
     where omega=2*pi
