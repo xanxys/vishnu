@@ -226,12 +226,24 @@ renderSample (w,dir,ty)=do
     where
         pt s t=do
             G.texCoord $ G.TexCoord2 s t
-            G.vertex $ v2v $ p0 + V.map (*sigma) (V.Vec3D (s*0.5) t 0) -- TODO: calculate Jacobian
+            G.vertex $ G.Vertex3 (px+s*sx) (py+t*sy) 0
+        
+        -- convert to NDC (top:theta=0, bottom:theta=pi, left:phi=1.5pi, right:phi=-0.5pi)
+        px=2*(if phi>1.5*pi then 1.75-phi/(2*pi) else 0.75-phi/(2*pi))-1
+        py=2*(1-theta/pi)-1
+        
+        sx=sigma*0.5/sin theta
+        sy=sigma*1
         
         sigma=1
-        
-        p0=project dir
-        project (V.Vec3D dx dy dz)=V.Vec3D (atan2 (-dx) (-dy) / pi) (2 * asin dz / pi) 0
+        (theta,phi)=directionInSpherical $ negate dir
+
+-- | Convert unit vector in cartesian coordinates to spherical coordinates (theta,phi)
+-- theta: [0,pi], measured from Z+
+-- phi: [0,2pi], measured from X+ in X-Y plane.
+directionInSpherical :: V.Vec3D -> (Double,Double)
+directionInSpherical (V.Vec3D dx dy dz)=(0.5*pi-asin dz,pi+atan2 (-dy) (-dx))
+
 
 toColor w World.Red=G.Color4 1 0 0 w
 toColor w World.Green=G.Color4 0 1 0 w
