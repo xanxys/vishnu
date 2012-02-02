@@ -1,12 +1,14 @@
 -- | temporarily modified for experimenting with 2-d visual programming language
 -- {-# LANGUAGE TemplateHaskell, QuasiQuotes, FlexibleContexts #-}
 module IPR(iprView) where
+import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Monad
 import Control.Monad.IO.Class
 import qualified Data.Vec as V
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Maybe
 import Data.IORef
 import Data.Word
@@ -113,10 +115,10 @@ data Node
     |EncapNode -- * | []
     |IndexNode -- array, int | array
     -- spatial
-    |SearchNode -- Float | [] (order undefined. but nearest-first is preferred)
+    |SearchNode -- Float | [] [] (order undefined. but nearest-first is preferred)
     |LocateNode -- Node | Float, Float
     |MoveNode -- Node, Float, Float |
-    -- structural
+    -- structural (you can't read existing connection information)
     |ConnectNode -- Node, Int, Node, Int |
     |DisconnectNode -- Node, Int |
     |WrapNode -- * | Node (create ConstNode, since it's parametric)
@@ -204,8 +206,14 @@ execNodeAction w SearchNode ni=do
     i<-readIPort w (ni,0)
     case i of
         FloatData radius -> do
-            (World nodes _ _)<-readIORef w
-            ioUpdateOPort w (ni,1) $ ArrayData $ map (NodeData . fst3) $ filter (\(_,q,_)->V.norm (p-q)<radius) nodes
+            (World nodes conns _)<-readIORef w
+            let
+                nis=map fst3 $ filter (\(_,q,_)->V.norm (p-q)<radius) nodes
+                niss=S.fromList nis
+            ioUpdateOPort w (ni,1) $ ArrayData $ map NodeData nis
+            ioUpdateOPort w (ni,2) $ ArrayData $ map
+                (\((sn,sp),(dn,dp))->ArrayData [NodeData sn,IntData (fromIntegral sp),NodeData dn,IntData (fromIntegral dp)]) $ filter
+                (\x->S.member (fst $ fst x) niss || S.member (fst $ snd x) niss) $ map fst conns
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
 execNodeAction w MoveNode ni=do
