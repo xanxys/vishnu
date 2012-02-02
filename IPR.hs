@@ -1,5 +1,5 @@
 -- | temporarily modified for experimenting with 2-d visual programming language
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, FlexibleContexts #-}
+-- {-# LANGUAGE TemplateHaskell, QuasiQuotes, FlexibleContexts #-}
 module IPR(iprView) where
 import Control.Concurrent
 import Control.Concurrent.MVar
@@ -21,30 +21,57 @@ import System.Random
 -- import World
 
 
-data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord)
 
-generateNodeId :: IO NodeId
-generateNodeId=liftM2 NodeId randomIO randomIO
+iprView :: IO ()
+iprView=do
+    initGUI
+    
+    window <- windowNew
+    darea <- drawingAreaNew
+    
+    set window [ containerBorderWidth := 10, containerChild := darea ]
 
-instance Show NodeId where
-    show (NodeId p0 p1)=printf "%016x%016x" p0 p1
-
-instance Random Word64 where
-    randomIO=liftM fromIntegral $ (randomRIO (0,0xffffffffffffffffffffffff) :: IO Integer)
-
--- desirable order:
+    widgetModifyBg darea StateNormal (Color 0xffff 0xffff 0xffff)
+    
+    w<-newIORef emptyWorld
+    n0<-ioInsSpecialNode w (V.Vec2D 10 10) (IntData 0) "int src"
+    n1<-ioInsSpecialNode w (V.Vec2D 10 30) (IntData 0) "int src"
+    nadd<-ioInsNormalNode w (V.Vec2D 30 30) AddNode
+    n2<-ioInsSpecialNode w (V.Vec2D 50 50) EmptyData "sink"
+    ioConnect w (n0,0) (nadd,0)
+    ioConnect w (n1,0) (nadd,1)
+    ioConnect w (nadd,2) (n2,0)
+    
+    n0<-ioInsNormalNode w (V.Vec2D 50 100) (ConstNode $ FloatData 100)
+    n1<-ioInsNormalNode w (V.Vec2D 50 150) SearchNode
+    n2<-ioInsSpecialNode w (V.Vec2D 50 200) EmptyData "sink"
+    ioConnect w (n0,0) (n1,0)
+    ioConnect w (n1,1) (n2,0)
+    dragging<-newIORef Nothing
+    
+    --register
+    window `on` destroyEvent $ tryEvent $ liftIO exitSuccess -- mainQuit
+    
+    widgetAddEvents darea [PointerMotionMask]
+    darea `on` motionNotifyEvent $ tryEvent $ move darea dragging w
+    darea `on` exposeEvent $ tryEvent $ draw darea w
+    darea `on` buttonPressEvent $ tryEvent $ press darea dragging w
+    
+    widgetShowAll window
+    mainGUI
+    
+    
+-- | desirable order:
 --  list all: O(N)
 --  find within distance R: O(N_R log(N))
 -- lookup node info from id: 
 -- 
-data World=World [(NodeId,V.Vec2D,Node)] [((NodeId,PortId),(NodeId,PortId))] [(NodeId,Data)]
+data World=World [(NodeId,V.Vec2D,Node)] [((PortDesc,PortDesc),Data)] [(NodeId,Data)]
+
 
 emptyWorld=World [] [] []
 
-
-
-
--- operational model: (array is very different from others... since its size is not bounded)
+-- | operational model: (array is very different from others... since its size is not bounded)
 -- changing array to tuple won't help. they will just get bigger (because of overhead).
 --
 -- data can be stored by FF or creating new constnode
@@ -65,35 +92,34 @@ emptyWorld=World [] [] []
 --
 -- port-port transfer takes O(1+distance * size of data) time
 --
-
-type PortId=Int
-
 -- lots of primitives. but you should keep them under 100 or so.
+-- nodes are stateless. connections are.
 data Node
     =ConstNode Data -- | *
     |PrimNode String -- polymorphic node. wait. PrimNode isn't enough for everything?
     |TapNode -- * | *,*
     |IdNode -- * | *
     -- arith
-    |AddNode Data Data Data -- Num,Num | Num
-    |MulNode -- Num,Num | Num
-    |CompareNode -- Num,Num | Bool
-    |EqualNode -- Int,Int | Bool
+    |AddNode -- Num,Num | Num
+    |MulNode -- Num, Num | Num
+    |CompareNode -- Num, Num | Bool
+    |EqualNode -- Int, Int | Bool
     -- bool
     |NandNode -- Bool, Bool | Bool
     |MuxNode -- Bool, *, * | *
     -- array
-    |LengthNode -- array | int
-    |ConcatNode -- array, array | array
-    |EncapNode -- * | [*]
+    |LengthNode -- [] | int
+    |ConcatNode -- [], [] | array
+    |EncapNode -- * | []
     |IndexNode -- array, int | array
-    -- special
-    |SearchNode -- Float | [Node] (order undefined. but nearest-first is preferred)
-    |LocateNode -- Node | Float Float
-    |MoveNode -- Node Float Float |
-    |ConnectNode -- Node,Int,Node,Int |
-    |DisconnectNode -- Node,Int |
-    |WrapNode -- * | Node
+    -- spatial
+    |SearchNode -- Float | [] (order undefined. but nearest-first is preferred)
+    |LocateNode -- Node | Float, Float
+    |MoveNode -- Node, Float, Float |
+    -- structural
+    |ConnectNode -- Node, Int, Node, Int |
+    |DisconnectNode -- Node, Int |
+    |WrapNode -- * | Node (create ConstNode, since it's parametric)
     |ReplicateNode -- Node | Node
     |DeleteNode -- Node |
 
@@ -108,72 +134,150 @@ data Data
     deriving(Show)
 
 
-iprView :: IO ()
-iprView=do
-    initGUI
-    
-    window <- windowNew
-    darea <- drawingAreaNew
-    
-    set window [ containerBorderWidth := 10, containerChild := darea ]
 
-    widgetModifyBg darea StateNormal (Color 0xffff 0xffff 0xffff)
-    
-    w<-newIORef emptyWorld
-    n0<-ioInsSpecialNode w (V.Vec2D 10 10) (IntData 0) "int src"
-    n1<-ioInsSpecialNode w (V.Vec2D 10 30) (IntData 0) "int src"
-    nadd<-ioInsNormalNode w (V.Vec2D 30 30) (AddNode EmptyData EmptyData EmptyData)
-    n2<-ioInsSpecialNode w (V.Vec2D 50 50) EmptyData "sink"
-    ioConnect w (n0,0) (nadd,0)
-    ioConnect w (n1,0) (nadd,1)
-    ioConnect w (nadd,2) (n2,0)
-    dragging<-newIORef Nothing
-    
-    --register
-    window `on` destroyEvent $ tryEvent $ liftIO exitSuccess -- mainQuit
-    
-    widgetAddEvents darea [PointerMotionMask]
-    darea `on` motionNotifyEvent $ tryEvent $ move darea dragging w
-    darea `on` exposeEvent $ tryEvent $ draw darea w
-    darea `on` buttonPressEvent $ tryEvent $ press darea dragging w
-    
-    widgetShowAll window
-    mainGUI
+extractFloat (IntData x)=Just $ fromIntegral x
+extractFloat (FloatData x)=Just x
+extractFloat _=Nothing
 
-ioUpdateOPort :: IORef World -> (NodeId,Int) -> Data -> IO ()
+
+addD (IntData x) (IntData y)=IntData $ x+y
+addD _ _=EmptyData
+    
+
+
+
+data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord)
+
+generateNodeId :: IO NodeId
+generateNodeId=liftM2 NodeId randomIO randomIO
+
+instance Show NodeId where
+    show (NodeId p0 p1)=printf "%016x%016x" p0 p1
+
+instance Random Word64 where
+    randomIO=liftM fromIntegral $ (randomRIO (0,0xffffffffffffffffffffffff) :: IO Integer)
+
+
+
+
+
+type PortDesc=(NodeId,PortId)
+type PortId=Int
+
+
+
+
+ioUpdateOPort :: IORef World -> PortDesc -> Data -> IO ()
 ioUpdateOPort w port d=do
     (World nodes conns exts)<-readIORef w
-    case find ((==port) . fst) conns of
+    case find f conns of
         Nothing -> return () -- no outgoing connection
-        Just (_,to) -> do
-            ioUpdateIPort w to d
+        Just ((_,to),_) -> do
+            writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
+            ioUpdateAnyIPort w $ fst to
+    where f=(==port) . fst . fst
 
-fst3 (a,b,c)=a
 
-ioUpdateIPort :: IORef World -> (NodeId,Int) -> Data -> IO ()
-ioUpdateIPort w (ni,pi) d=do
+ioUpdateAnyIPort :: IORef World -> NodeId -> IO ()
+ioUpdateAnyIPort w ni=do
     (World nodes conns exts)<-readIORef w
     case find (\(i,p,n)->i==ni) nodes of
         Nothing -> putStrLn "dangling connection"
         Just (_,p,n) -> do
-            execNodeAction w n ni pi d
+            execNodeAction w n ni
 
--- maybe it should be good to move input/output buffer to connections
-execNodeAction w (PrimNode "sink") ni 0 d=do
+
+execNodeAction w (PrimNode "sink") ni=do
+    d<-readIPort w (ni,0)
     modifyIORef w $ \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
-execNodeAction w (AddNode _ i1 o) ni 0 d=do
-    let o'=addD d i1
-    modifyIORef w $ \(World nodes conns exts)->World (map (\t@(i,p,_)->if ni/=i then t else (i,p,AddNode d i1 o')) nodes) conns exts
-    ioUpdateOPort w (ni,2) o'
-execNodeAction w (AddNode i0 _ o) ni 1 d=do
-    let o'=addD i0 d
-    modifyIORef w $ \(World nodes conns exts)->World (map (\t@(i,p,_)->if ni/=i then t else (i,p,AddNode i0 d o')) nodes) conns exts
-    ioUpdateOPort w (ni,2) o'
-execNodeAction w _ _ _ _=return ()
+
+execNodeAction w (ConstNode d) ni=
+    ioUpdateOPort w (ni,0) d
+
+execNodeAction w AddNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ addD i0 i1
+
+execNodeAction w SearchNode ni=do
+    p<-getNodePosition w ni
+    i<-readIPort w (ni,0)
+    case i of
+        FloatData radius -> do
+            (World nodes _ _)<-readIORef w
+            ioUpdateOPort w (ni,1) $ ArrayData $ map (NodeData . fst3) $ filter (\(_,q,_)->V.norm (p-q)<radius) nodes
+        _ -> ioUpdateOPort w (ni,1) EmptyData
+
+execNodeAction w MoveNode ni=do
+    tg<-readIPort w (ni,0)
+    dx<-readIPort w (ni,1)
+    dy<-readIPort w (ni,2)
+    case (tg,extractFloat dx,extractFloat dy) of
+        (NodeData tg,Just dx,Just dy) -> do
+            World nodes conns exts<-readIORef w
+            let Just (_,p,_)=find ((==tg) . fst3) nodes
+            setNodePosition w tg $ p+V.Vec2D dx dy
+        _ -> return ()
+    
+
+execNodeAction w ReplicateNode ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        NodeData ni -> do
+            (World nodes conns exts)<-readIORef w
+            case find ((==ni) . fst3) nodes of
+                Just (_,p,x) -> do
+                    ni'<-generateNodeId
+                    writeIORef w $ World ((ni',p,x):nodes) conns exts
+                    ioUpdateOPort w (ni,1) $ NodeData ni'
+                Nothing -> ioUpdateOPort w (ni,1) EmptyData
+        _ -> ioUpdateOPort w (ni,1) EmptyData
+
+execNodeAction w DeleteNode ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        NodeData ni -> ioRemoveNode w ni
+        _ -> return ()
+
+execNodeAction w ConnectNode ni=do
+    sn<-readIPort w (ni,0)
+    sp<-readIPort w (ni,1)
+    dn<-readIPort w (ni,2)
+    dp<-readIPort w (ni,3)
+    case (sn,sp,dn,dp) of
+        (NodeData sn,IntData sp,NodeData dn,IntData dp) -> ioConnect w (sn,fromIntegral sp) (dn,fromIntegral dp)
+        _ -> return ()
+
+            
+execNodeAction w _ _=return ()
 
 
+
+getNodePosition w ni=do
+    World nodes _ _<-readIORef w
+    let Just (_,p,_)=find ((==ni) . fst3) nodes
+    return p
+
+-- TODO: should this function cause updateAnyIPort of SearchNode --> it's impossible?
+setNodePosition w ni p=do
+    World nodes conns exts<-readIORef w
+    let nodes'=map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes
+    writeIORef w $ World nodes' conns exts
     
-    
+
+
+
+readIPort :: IORef World -> PortDesc -> IO Data
+readIPort w pd=do
+    (World nodes conns exts)<-readIORef w
+    case find f conns of
+        Nothing -> return EmptyData
+        Just ((_,_),d) -> return d
+    where  f=(==pd) . snd . fst
+
+
+
+
         
 
 ioInsNormalNode :: IORef World -> V.Vec2D -> Node -> IO NodeId
@@ -188,19 +292,24 @@ ioInsSpecialNode w pos d ty=do
     modifyIORef w $ \(World nodes conn exts)->World ((nid,pos,PrimNode ty):nodes) conn ((nid,d):exts)
     return nid
 
-ioConnect :: IORef World -> (NodeId,PortId) -> (NodeId,PortId) -> IO ()
+ioRemoveNode :: IORef World -> NodeId -> IO ()
+ioRemoveNode w ni=do
+    (World nodes conns exts)<-readIORef w
+    let dsts=nub $ map (fst . snd) $ filter (\(s,d)->fst s==ni && fst d/=ni) $ map fst conns
+    writeIORef w $ World 
+        (filter ((/=ni) . fst3) nodes) (filter (\((s,d),_)->fst s/=ni && fst d/=ni) conns) (filter ((/=ni) . fst) exts)
+    mapM_ (ioUpdateAnyIPort w) dsts
+
+-- | ignores duplicate connection request
+ioConnect :: IORef World -> PortDesc -> PortDesc -> IO ()
 ioConnect w s d=do
-    modifyIORef w $ \(World nodes conns exts)->World nodes ((s,d):conns) exts
-
-insNormalNode :: V.Vec2D -> Node -> World -> IO World
-insNormalNode pos n (World nodes conn exts)=do
-    nid<-generateNodeId
-    return $ World ((nid,pos,n):nodes) conn exts
-
-insSpecialNode :: V.Vec2D -> Data -> String -> World -> IO World
-insSpecialNode pos d ty (World nodes conn exts)=do
-    nid<-generateNodeId
-    return $ World ((nid,pos,PrimNode ty):nodes) conn ((nid,d):exts)
+    World nodes conns exts<-readIORef w
+    case find ((==c) .fst) conns of
+        Nothing -> do
+            writeIORef w $ World nodes ((c,EmptyData):conns) exts
+            ioUpdateAnyIPort w $ fst s
+        _ -> return ()
+    where c=(s,d)
 
 draw :: DrawingArea -> IORef World -> EventM EExpose ()
 draw da w=liftIO $ do
@@ -214,7 +323,7 @@ renderWorld (World nodes conns exts)=do
     mapM_ (\(_,V.Vec2D x y,_)->arc x y 2 0 (2*pi) >> fill) nodes
     
     let m=M.fromList $ map (\(i,p,n)->(i,(p,n))) nodes
-    mapM_ (\((np,_),(nq,_))->arrow (fst $ m M.! np) (fst $ m M.! nq)) conns
+    mapM_ (\(((np,_),(nq,_)),_)->arrow (fst $ m M.! np) (fst $ m M.! nq)) conns
     
     -- extended  structure
     let me=M.fromList exts
@@ -306,6 +415,7 @@ press widget dragging w=do
                     Just _ -> writeIORef dragging $ Nothing
             |otherwise = return ()
 
-addD (IntData x) (IntData y)=IntData $ x+y
-addD _ _=EmptyData
-    
+
+fst3 (a,b,c)=a
+
+
