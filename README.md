@@ -13,23 +13,21 @@ Currently vishnu provides a 3d canvas where you can draw or read from views. A v
 coordinate with pre-defined interface. Currently supported view types are:
 
 * CUI: this is what you get when you run vishnu.
-* IPR: agent controlled by a script in a window
 * FlyThrough: a window with FPS-like control
-* MsgPack: externally defined interface w/ simple protocol based on msgpack datagrams
 
-Views can spawn other views with relative coordinate (interface not implemented yet).
+Views can spawn other views, or move around.
 Notable thing about vishnu is, its underlying lattice structure is hidden with appropriate Gaussian kernel,
 so all views are equal in their privillege.
 
-Future direction is to add sound and light propagation and implement in symmetrical P2P
+Future direction is to add acoustics / kinetics and implement in symmetrical P2P fashion
 (i.e. no single node holds complete world structure, yet as a network they represent a single world.)
 
-example (not working)
+example
 
     spawn fly
     light
 
-VsThin
+VsThin (not working)
 -----
 A Haskell wrapper for msgpack-view suitable for interactive use in GHCi. Currently it's draw-only.
 

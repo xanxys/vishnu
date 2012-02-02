@@ -56,7 +56,7 @@ flyThroughView=safeTrampoline $ \cvc->do
             vs0<-readIORef vs
             cv0<-takeMVar cvc
             samples<-takeMVar ss
-            let samples'=evolveSamples $ map (\(d,t)->(1,d,t)) cv0++samples
+            let samples'=evolveSamples $ map (\(d,t)->(0.3,d,t)) cv0++samples
             putMVar ss samples'
             render samples'
         
@@ -198,7 +198,7 @@ reshapeCB (Size w h)
 evolveSamples :: [(Double,V.Vec3D,PhotonType)] -> [(Double,V.Vec3D,PhotonType)]
 evolveSamples=filter large . map f
     where
-        f (w,d,ty)=(w*0.9,d,ty)
+        f (w,d,ty)=(w*0.995,d,ty)
         large (w,_,_)=w>0.01
 
 -- | map photons onto plane as panorama

@@ -2,7 +2,7 @@
 --
 module Main where
 import World
-import CUI
+import IPR
 
-main=createWorld cuiView
+main=iprView -- createWorld cuiView
 
