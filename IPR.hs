@@ -4,7 +4,6 @@ module IPR(iprView) where
 import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.MVar
--- import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
 import qualified Data.Vec as V
@@ -16,14 +15,12 @@ import Data.Word
 import Data.Int
 import Data.List
 import Data.Ord
--- import System.Glib.MainLoop
 import Graphics.UI.Gtk hiding (Cursor)
 import Graphics.Rendering.Cairo
 import Text.Printf
 import System.IO
 import System.Exit
 import System.Random
--- import World
 
 
 
@@ -128,11 +125,11 @@ emptyWorld=World [] [] []
 --
 -- lots of primitives. but you should keep them under 100 or so.
 --
+-- TODO: rename "connect" or "disconenct" to "keep" or "inhibit"? because they're continuous action
 data Node
     =ConstNode Data -- | *
     |PrimNode String -- polymorphic node. wait. PrimNode isn't enough for everything?
     |TapNode -- * | *,*
---    |IdNode -- * | *
     -- arith
     |AddNode -- Num,Num | Num
     |MulNode -- Num, Num | Num
@@ -156,9 +153,9 @@ data Node
     |WrapNode Bool -- * | Node (create ConstNode, since it's parametric)
     |ReplicateNode Bool -- Node | Node
     |DeleteNode -- Node |
-    deriving(Show,Read) -- TODO: rename "connect" or "disconenct" to "keep" or "inhibit"? because they're
-    -- continuous action
+    deriving(Show,Read) 
 
+-- | /primitive/ values. TODO: make them bounded (i.e. remove Array, Tuple etc.)
 data Data
     =ArrayData [Data] -- N<2^31
     |IntData Int32
@@ -168,13 +165,9 @@ data Data
     |EmptyData
     deriving(Show,Read)
 
-
-
-
 extractFloat (IntData x)=Just $ fromIntegral x
 extractFloat (FloatData x)=Just x
 extractFloat _=Nothing
-
 
 addD (IntData x) (IntData y)=IntData $ x+y
 addD (IntData x) (FloatData y)=FloatData $ fromIntegral x+y
@@ -212,11 +205,6 @@ concatD _ _=EmptyData
 encapD EmptyData=EmptyData
 encapD d=ArrayData [d]
 
-
-
-
-
-
 nandD (BoolData x) (BoolData y)=BoolData $ not $ x&&y
 nandD _ _=EmptyData
 
@@ -227,19 +215,14 @@ indexD (ArrayData xs) (IntData i)
 indexD _ _=EmptyData
 
 
+
+
 data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord,Show,Read)
 
 generateNodeId :: IO NodeId
 generateNodeId=liftM2 NodeId randomIO randomIO
 
-{-
-instance Show NodeId where
-    show (NodeId p0 p1)=printf "%016x%016x" p0 p1
 
-instance Read NodeId where
-    readsPrec _ s=[(NodeId (read $ "0x"++take 16 n) (read $ "0x"++drop 16 n),x)] -- TODO: exception
-        where (n,x)=splitAt 32 s
--}
 
 instance Random Word64 where
     randomIO=liftM fromIntegral $ (randomRIO (0,0xffffffffffffffffffffffff) :: IO Integer)
@@ -271,9 +254,8 @@ seqStep1 w=do
         y<-randomRIO (miny,maxy)
         let p=V.Vec2D x y
         
-        let (ni,_,_)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
---        print ni
-        ioUpdateAnyIPort w ni
+        let (ni,_,n)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
+        execNodeAction w n ni
 
 
 ioUpdateOPort :: IORef World -> PortDesc -> Data -> IO ()
@@ -283,17 +265,8 @@ ioUpdateOPort w port d=do
         Nothing -> return () -- no outgoing connection
         Just ((_,to),_) -> do
             writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
---            ioUpdateAnyIPort w $ fst to -- make this asynchronous
     where f=(==port) . fst . fst
 
-
-ioUpdateAnyIPort :: IORef World -> NodeId -> IO ()
-ioUpdateAnyIPort w ni=do
-    (World nodes conns exts)<-readIORef w
-    case find (\(i,p,n)->i==ni) nodes of
-        Nothing -> putStrLn "dangling connection"
-        Just (_,p,n) -> do
-            execNodeAction w n ni
 
 execNodeAction w (ConstNode d) ni=
     ioUpdateOPort w (ni,0) d
@@ -434,7 +407,7 @@ execNodeAction w (WrapNode False) ni=do
         _ -> do
             case find ((==ni) . fst3) nodes of
                 Just (_,p,_) -> do
-                    dp<-liftM2 V.Vec2D randomNIO randomNIO
+                    dp<-randomN2IO
                     writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,WrapNode True)) nodes)
                         conns exts
                     ni'<-ioInsNormalNode w (p+V.map (*100) dp) $ ConstNode i
@@ -456,7 +429,7 @@ execNodeAction w (ReplicateNode False) ni=do
             (World nodes conns exts)<-readIORef w
             case find ((==ni) . fst3) nodes of
                 Just (_,p,x) -> do
-                    dp<-liftM2 V.Vec2D randomNIO randomNIO
+                    dp<-randomN2IO
                     writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,ReplicateNode True)) nodes)
                         conns exts
                     ni'<-ioInsNormalNode w (p+V.map (*100) dp) x
@@ -490,7 +463,6 @@ getNodePosition w ni=do
     let Just (_,p,_)=find ((==ni) . fst3) nodes
     return p
 
--- TODO: should this function cause updateAnyIPort of SearchNode --> it's impossible?
 setNodePosition w ni p=do
     World nodes conns exts<-readIORef w
     let nodes'=map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes
@@ -532,7 +504,6 @@ ioRemoveNode w ni=do
     let dsts=nub $ map (fst . snd) $ filter (\(s,d)->fst s==ni && fst d/=ni) $ map fst conns
     writeIORef w $ World 
         (filter ((/=ni) . fst3) nodes) (filter (\((s,d),_)->fst s/=ni && fst d/=ni) conns) (filter ((/=ni) . fst) exts)
-    mapM_ (ioUpdateAnyIPort w) dsts
 
 -- | ignores duplicate connection request
 ioConnect :: IORef World -> PortDesc -> PortDesc -> IO ()
@@ -541,7 +512,6 @@ ioConnect w s d=do
     case find ((==c) .fst) conns of
         Nothing -> do
             writeIORef w $ World nodes ((c,EmptyData):conns) exts
-            ioUpdateAnyIPort w $ fst s
         _ -> return ()
     where c=(s,d)
 
@@ -551,7 +521,6 @@ ioDisconnect w p=do
     let dsts=map (fst . snd) $ filter (\(s,d)->s==p && d/=p) $ map fst conns
     writeIORef w $ World
         nodes (filter (\((s,d),_)->s/=p && d/=p) conns) exts
-    mapM_ (ioUpdateAnyIPort w) dsts
 
 draw :: DrawingArea ->  IORef Cursor -> IORef World -> EventM EExpose ()
 draw da cursor w=liftIO $ do
@@ -731,6 +700,9 @@ press widget dragging w=do
             |otherwise = return False
 
 
+-- | Sample from 2d normal distribution
+randomN2IO=liftM2 V.Vec2D randomNIO randomNIO
+
 -- | Sample from the normal distribution
 randomNIO :: IO Double
 randomNIO=do
@@ -747,5 +719,6 @@ chain :: Monad m => m Bool -> m Bool -> m Bool
 chain f g=do{x<-f; if x then return True else g}
 
 fst3 (a,b,c)=a
+
 
 
