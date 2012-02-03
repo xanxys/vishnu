@@ -51,11 +51,12 @@ iprView=do
         mapM_ (\(i,t)->ioInsNormalNode w
             (V.Vec2D (50+fromIntegral (i `div` n)*80) (200+fromIntegral (i `mod` n)*50)) t)
             $ zip [0..] [ConstNode $ IntData 1,ConstNode $ FloatData 0,ConstNode $ FloatData 100,
+                            TapNode,
                             AddNode,MulNode,CompareNode,EqualNode,
                             NandNode,MuxNode,
                             LengthNode,ConcatNode,IndexNode,EncapNode,
                             SearchNode,LocateNode,MoveNode,
-                            ConnectNode,DisconnectNode,WrapNode,ReplicateNode,DeleteNode]
+                            ConnectNode,DisconnectNode,WrapNode False,ReplicateNode False,DeleteNode]
     
     cursor<-newIORef Idle
     
@@ -69,7 +70,8 @@ iprView=do
     darea `on` buttonPressEvent $ tryEvent $ press darea cursor w
     
     -- update
-    idleAdd (seqStep1 w >> widgetQueueDraw darea >>  return True) priorityDefaultIdle
+    idleAdd (seqStep1 w >>  return True) priorityDefaultIdle
+    timeoutAdd (widgetQueueDraw darea >> return True) 100
     
     widgetShowAll window
     mainGUI
@@ -104,6 +106,7 @@ emptyWorld=World [] [] []
 -- changing array to tuple won't help. they will just get bigger (because of overhead).
 --
 -- nodes are stateless. connections are.
+-- (WrapNode and ReplicateNode detects rising edge, so they actually have 1 bit state)
 --
 -- data can be stored by FF or creating new ConstNode (by using WrapNode)
 --
@@ -150,8 +153,8 @@ data Node
     -- structural
     |ConnectNode -- Node, Int, Node, Int |
     |DisconnectNode -- Node, Int |
-    |WrapNode -- * | Node (create ConstNode, since it's parametric)
-    |ReplicateNode -- Node | Node
+    |WrapNode Bool -- * | Node (create ConstNode, since it's parametric)
+    |ReplicateNode Bool -- Node | Node
     |DeleteNode -- Node |
     deriving(Show,Read)
 
@@ -227,14 +230,17 @@ seqStep1 w=do
     
     when (n>0) $ do
         let
-            V.Vec2D minx miny=minimum ps
-            V.Vec2D maxx maxy=maximum ps
+            minx=minimum $ map (\(V.Vec2D x _)->x) ps
+            maxx=maximum $ map (\(V.Vec2D x _)->x) ps
+            miny=minimum $ map (\(V.Vec2D _ y)->y) ps
+            maxy=maximum $ map (\(V.Vec2D _ y)->y) ps
         
         x<-randomRIO (minx,maxx)
         y<-randomRIO (miny,maxy)
         let p=V.Vec2D x y
         
         let (ni,_,_)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
+--        print ni
         ioUpdateAnyIPort w ni
 
 
@@ -257,6 +263,10 @@ ioUpdateAnyIPort w ni=do
         Just (_,p,n) -> do
             execNodeAction w n ni
 
+execNodeAction w (PrimNode "int src") ni=do
+    World _ _ exts<-readIORef w
+    let Just x=lookup ni exts
+    ioUpdateOPort w (ni,0) x
 
 execNodeAction w (PrimNode "sink") ni=do
     d<-readIPort w (ni,0)
@@ -327,20 +337,52 @@ execNodeAction w MoveNode ni=do
         _ -> return ()
     
 
-execNodeAction w ReplicateNode ni=do
+execNodeAction w (ReplicateNode False) ni=do
     i<-readIPort w (ni,0)
     case i of
         NodeData ni -> do
             (World nodes conns exts)<-readIORef w
             case find ((==ni) . fst3) nodes of
                 Just (_,p,x) -> do
-                    ni'<-generateNodeId
                     dp<-liftM2 V.Vec2D randomNIO randomNIO
-                    writeIORef w $ World ((ni',p+V.map (*100) dp,x):nodes) conns exts
+                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,ReplicateNode True)) nodes)
+                        conns exts
+                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) x
                     ioUpdateOPort w (ni,1) $ NodeData ni'
                 Nothing -> ioUpdateOPort w (ni,1) EmptyData
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
+execNodeAction w (ReplicateNode True) ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        EmptyData -> do
+            World nodes conns exts<-readIORef w
+            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,ReplicateNode False)) nodes)
+                        conns exts
+        _ -> return ()
+
+execNodeAction w (WrapNode False) ni=do
+    i<-readIPort w (ni,0)
+    (World nodes conns exts)<-readIORef w
+    case i of
+        EmptyData -> ioUpdateOPort w (ni,1) EmptyData
+        _ -> do
+            case find ((==ni) . fst3) nodes of
+                Just (_,p,_) -> do
+                    dp<-liftM2 V.Vec2D randomNIO randomNIO
+                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,WrapNode True)) nodes)
+                        conns exts
+                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) $ ConstNode i
+                    ioUpdateOPort w (ni,1) $ NodeData ni'
+                Nothing -> ioUpdateOPort w (ni,1) EmptyData
+execNodeAction w (WrapNode True) ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        EmptyData -> do
+            World nodes conns exts<-readIORef w
+            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,WrapNode False)) nodes)
+                        conns exts
+        _ -> return ()
 execNodeAction w DeleteNode ni=do
     i<-readIPort w (ni,0)
     case i of
