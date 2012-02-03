@@ -14,7 +14,7 @@ import Data.IORef
 import Data.Word
 import Data.Int
 import Data.List
-import Graphics.UI.Gtk
+import Graphics.UI.Gtk hiding (Cursor)
 import Graphics.Rendering.Cairo
 import Text.Printf
 import System.IO
@@ -49,20 +49,24 @@ iprView=do
     n2<-ioInsSpecialNode w (V.Vec2D 50 200) EmptyData "sink"
     ioConnect w (n0,0) (n1,0)
     ioConnect w (n1,1) (n2,0)
-    dragging<-newIORef Nothing
+    cursor<-newIORef Idle
     
-    --register
+    -- window close (somehow not working correctly)
     window `on` destroyEvent $ tryEvent $ liftIO exitSuccess -- mainQuit
     
+    -- node control w/ mouse
     widgetAddEvents darea [PointerMotionMask]
-    darea `on` motionNotifyEvent $ tryEvent $ move darea dragging w
-    darea `on` exposeEvent $ tryEvent $ draw darea w
-    darea `on` buttonPressEvent $ tryEvent $ press darea dragging w
+    darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w
+    darea `on` exposeEvent $ tryEvent $ draw darea cursor w
+    darea `on` buttonPressEvent $ tryEvent $ press darea cursor w
     
     widgetShowAll window
     mainGUI
-    
-    
+
+
+-- TODO: moving cursor position around is not clean...
+data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D 
+
 -- | desirable order:
 --  list all: O(N)
 --  find within distance R: O(N_R log(N))
@@ -322,7 +326,9 @@ readIPort w pd=do
 
 
 
-
+portHasConnection w pdesc=do
+    (World _ conns _)<-readIORef w
+    return $ not $ null $ filter (\((s,d),_)->s==pdesc || d==pdesc) conns
         
 
 ioInsNormalNode :: IORef World -> V.Vec2D -> Node -> IO NodeId
@@ -364,16 +370,21 @@ ioDisconnect w p=do
         nodes (filter (\((s,d),_)->s/=p && d/=p) conns) exts
     mapM_ (ioUpdateAnyIPort w) dsts
 
-draw :: DrawingArea -> IORef World -> EventM EExpose ()
-draw da w=liftIO $ do
+draw :: DrawingArea ->  IORef Cursor -> IORef World -> EventM EExpose ()
+draw da cursor w=liftIO $ do
     dw<-widgetGetDrawWindow da
     w<-readIORef w
-    renderWithDrawable dw $ renderWorld w
+    c<-readIORef cursor
+    renderWithDrawable dw $ renderWorld c w
 
-renderWorld (World nodes conns exts)=do
+renderWorld cursor (World nodes conns exts)=do
     -- basic structure
     mapM_ node nodes
     mapM_ (\((src,dst),_)->arrow (portPos src) (portPos dst)) conns
+    
+    case cursor of
+        ConnectFrom src cpos -> arrow (portPos src)  cpos
+        _ -> return ()
     
     -- extended  structure
     let me=M.fromList exts
@@ -449,35 +460,75 @@ normalizeV v=V.map (/(V.norm v)) v
 rotateCCW (V.Vec2D x y)=V.Vec2D (-y) x
 
 
-move :: DrawingArea -> IORef (Maybe NodeId) -> IORef World -> EventM EMotion ()
-move widget d w=do
-    dragging<-liftIO $ readIORef d
-    case dragging of
-        Nothing -> return ()
-        Just nid -> do
+move :: DrawingArea -> IORef Cursor -> IORef World -> EventM EMotion ()
+move widget cursor w=do
+    cst<-liftIO $ readIORef cursor
+    case cst of
+        Idle -> return ()
+        Grab nid -> do
             (px,py)<-eventCoordinates
             (World nodes conns exts)<-liftIO $ readIORef w
             let nodes'=map (\t@(i,pos,n)->if nid/=i then t else (i,V.Vec2D px py,n)) nodes
             liftIO $ writeIORef w $ World nodes' conns exts
             liftIO $ widgetQueueDraw widget
+        ConnectFrom srcport pos -> do
+            (px,py)<-eventCoordinates
+            liftIO $ writeIORef cursor $ ConnectFrom srcport $ V.Vec2D px py
+            liftIO $ widgetQueueDraw widget
 
-press :: DrawingArea -> IORef (Maybe NodeId) -> IORef World -> EventM EButton ()
+press :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
 press widget dragging w=do
     pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
     liftIO $ do
         (World nodes _ _)<-readIORef w
         dr<-readIORef dragging
         case dr of
-            Just ni -> drop ni
-            Nothing -> handleSeq_ (activate pos) nodes
+            Grab ni -> drop ni
+            ConnectFrom _ _ -> do
+                handled<-sequenceC $ map (conn pos) nodes
+                when handled $ widgetQueueDraw widget
+            Idle -> do
+                handled<-sequenceC $ map (activate pos) nodes
+                when handled $ widgetQueueDraw widget
     where
-        drop ni=writeIORef dragging Nothing
-        pick ni=writeIORef dragging $ Just ni
+        startConn sp=writeIORef dragging $ ConnectFrom sp (V.Vec2D 0 0) -- TODO: hackish initial value
+        cancelConn=writeIORef dragging $ Idle
+        finishConn dp=do
+            d<-readIORef dragging
+            case d of
+                ConnectFrom sp _ -> ioConnect w sp dp >> cancelConn
+                _ -> error "finishConn: impossible state"
+        drop ni=writeIORef dragging Idle
+        pick ni=writeIORef dragging $ Grab ni
         
-        handleSeq_ f []=return ()
-        handleSeq_ f (x:xs)=f x>>=flip unless (handleSeq_ f xs)
+        conn pos (nid,c,n)=sequenceC $ map (connPort (pos-c) nid) [0..5]
         
-        activate pos (nid,c,n)=checkNode (pos-c) nid n
+        
+        activate pos (nid,c,n)=checkPorts (pos-c) nid `chain` checkNode (pos-c) nid n
+        
+        checkPorts d nid=sequenceC $ map (checkPort d nid) [0..5]
+        
+        connPort d nid pix=do
+            let
+                center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
+                theta=pi*0.1*fromIntegral pix
+            
+            if V.norm (center-d)<5
+                then finishConn (nid,pix) >> return True
+                else return False
+        
+        checkPort d nid pix=do
+            let
+                center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
+                theta=pi*0.1*fromIntegral pix
+            
+            if V.norm (center-d)<5
+                then do
+                    ex<-portHasConnection w (nid,pix)
+                    if ex then ioDisconnect w (nid,pix) else startConn (nid,pix)
+                    return True
+                else return False
+            
         
         checkNode (V.Vec2D dx dy) nid (PrimNode _)
             |abs dx<5 && abs dy<5 = do
@@ -495,6 +546,13 @@ press widget dragging w=do
             |abs dx<5 && abs dy<5 = pick nid >> return True
             |otherwise = return False
 
+
+sequenceC :: Monad m => [m Bool] -> m Bool
+sequenceC []=return False
+sequenceC (f:fs)=f `chain` (sequenceC fs)
+
+chain :: Monad m => m Bool -> m Bool -> m Bool
+chain f g=do{x<-f; if x then return True else g}
 
 fst3 (a,b,c)=a
 
