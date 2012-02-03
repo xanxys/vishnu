@@ -16,6 +16,7 @@ import Data.Word
 import Data.Int
 import Data.List
 import Data.Ord
+-- import System.Glib.MainLoop
 import Graphics.UI.Gtk hiding (Cursor)
 import Graphics.Rendering.Cairo
 import Text.Printf
@@ -46,11 +47,15 @@ iprView=do
         n1<-ioInsSpecialNode w (V.Vec2D 50 100) (IntData 0) "int src"
         n2<-ioInsSpecialNode w (V.Vec2D 50 150) EmptyData "sink"
         
-        mapM_ (\(i,t)->ioInsNormalNode w (V.Vec2D 50 (200+fromIntegral i*50)) t)
+        let n=10
+        mapM_ (\(i,t)->ioInsNormalNode w
+            (V.Vec2D (50+fromIntegral (i `div` n)*80) (200+fromIntegral (i `mod` n)*50)) t)
             $ zip [0..] [ConstNode $ IntData 1,ConstNode $ FloatData 0,ConstNode $ FloatData 100,
-                            AddNode,
-                            SearchNode,IndexNode,TapNode,
-                            ReplicateNode,WrapNode,MuxNode,EqualNode,NandNode]
+                            AddNode,MulNode,CompareNode,EqualNode,
+                            NandNode,MuxNode,
+                            LengthNode,ConcatNode,IndexNode,EncapNode,
+                            SearchNode,LocateNode,MoveNode,
+                            ConnectNode,DisconnectNode,WrapNode,ReplicateNode,DeleteNode]
     
     cursor<-newIORef Idle
     
@@ -62,6 +67,9 @@ iprView=do
     darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w
     darea `on` exposeEvent $ tryEvent $ draw darea cursor w
     darea `on` buttonPressEvent $ tryEvent $ press darea cursor w
+    
+    -- update
+    idleAdd (seqStep1 w >> widgetQueueDraw darea >>  return True) priorityDefaultIdle
     
     widgetShowAll window
     mainGUI
@@ -90,7 +98,8 @@ instance Show V.Vec2D where
 
 emptyWorld=World [] [] []
 
--- | operational model:
+
+-- | operational model (obsolete):
 -- (array is very different from others... since its size is not bounded)
 -- changing array to tuple won't help. they will just get bigger (because of overhead).
 --
@@ -208,6 +217,25 @@ type PortDesc=(NodeId,PortId)
 type PortId=Int
 
 
+-- approximate area-proprtional calculation by selecting nearest node from randomly sampled point
+seqStep1 :: IORef World -> IO ()
+seqStep1 w=do
+    (World nodes conns exts)<-readIORef w
+    let
+        n=length nodes
+        ps=map (\(_,p,_)->p) nodes
+    
+    when (n>0) $ do
+        let
+            V.Vec2D minx miny=minimum ps
+            V.Vec2D maxx maxy=maximum ps
+        
+        x<-randomRIO (minx,maxx)
+        y<-randomRIO (miny,maxy)
+        let p=V.Vec2D x y
+        
+        let (ni,_,_)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
+        ioUpdateAnyIPort w ni
 
 
 ioUpdateOPort :: IORef World -> PortDesc -> Data -> IO ()
@@ -217,7 +245,7 @@ ioUpdateOPort w port d=do
         Nothing -> return () -- no outgoing connection
         Just ((_,to),_) -> do
             writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
-            ioUpdateAnyIPort w $ fst to -- make this asynchronous
+--            ioUpdateAnyIPort w $ fst to -- make this asynchronous
     where f=(==port) . fst . fst
 
 
