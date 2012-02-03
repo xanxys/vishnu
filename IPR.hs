@@ -156,7 +156,8 @@ data Node
     |WrapNode Bool -- * | Node (create ConstNode, since it's parametric)
     |ReplicateNode Bool -- Node | Node
     |DeleteNode -- Node |
-    deriving(Show,Read)
+    deriving(Show,Read) -- TODO: rename "connect" or "disconenct" to "keep" or "inhibit"? because they're
+    -- continuous action
 
 data Data
     =ArrayData [Data] -- N<2^31
@@ -176,13 +177,44 @@ extractFloat _=Nothing
 
 
 addD (IntData x) (IntData y)=IntData $ x+y
+addD (IntData x) (FloatData y)=FloatData $ fromIntegral x+y
+addD (FloatData x) (IntData y)=FloatData $ x+fromIntegral y
+addD (FloatData x) (FloatData y)=FloatData $ x+y
 addD _ _=EmptyData
+
+mulD (IntData x) (IntData y)=IntData $ x*y
+mulD (IntData x) (FloatData y)=FloatData $ fromIntegral x*y
+mulD (FloatData x) (IntData y)=FloatData $ x*fromIntegral y
+mulD (FloatData x) (FloatData y)=FloatData $ x*y
+mulD _ _=EmptyData
+
+cmpD (IntData x) (IntData y)=BoolData $ x>=y
+cmpD (IntData x) (FloatData y)=BoolData $ fromIntegral x>=y
+cmpD (FloatData x) (IntData y)=BoolData $ x>=fromIntegral y
+cmpD (FloatData x) (FloatData y)=BoolData $ x>=y
+cmpD _ _=EmptyData
 
 -- | only Int,Bool,Node can be compared for equality
 eqD (IntData x) (IntData y)=BoolData $ x==y
 eqD (BoolData x) (BoolData y)=BoolData $ x==y
 eqD (NodeData x) (NodeData y)=BoolData $ x==y
 eqD _ _=EmptyData
+
+lengthD (ArrayData xs)=IntData $ fromIntegral $ length xs
+lengthD _=EmptyData
+
+concatD (ArrayData xs) (ArrayData ys)=ArrayData $ xs++ys -- TODO length clipping
+concatD (ArrayData xs) EmptyData=ArrayData xs
+concatD EmptyData (ArrayData xs)=ArrayData xs
+concatD EmptyData EmptyData=ArrayData []
+concatD _ _=EmptyData
+
+encapD EmptyData=EmptyData
+encapD d=ArrayData [d]
+
+
+
+
 
 
 nandD (BoolData x) (BoolData y)=BoolData $ not $ x&&y
@@ -263,6 +295,9 @@ ioUpdateAnyIPort w ni=do
         Just (_,p,n) -> do
             execNodeAction w n ni
 
+execNodeAction w (ConstNode d) ni=
+    ioUpdateOPort w (ni,0) d
+
 execNodeAction w (PrimNode "int src") ni=do
     World _ _ exts<-readIORef w
     let Just x=lookup ni exts
@@ -272,19 +307,36 @@ execNodeAction w (PrimNode "sink") ni=do
     d<-readIPort w (ni,0)
     modifyIORef w $ \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
 
-execNodeAction w (ConstNode d) ni=
-    ioUpdateOPort w (ni,0) d
-
-execNodeAction w AddNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ addD i0 i1
+execNodeAction w (PrimNode name) _=do
+    printf "unknown PrimNode: %s\n" name
 
 execNodeAction w TapNode ni=do
     i<-readIPort w (ni,0)
     ioUpdateOPort w (ni,1) i
     ioUpdateOPort w (ni,2) i
 
+-- arith
+execNodeAction w AddNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ addD i0 i1
+
+execNodeAction w MulNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ mulD i0 i1
+
+execNodeAction w CompareNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ cmpD i0 i1
+
+execNodeAction w EqualNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ eqD i0 i1
+
+-- bool
 execNodeAction w NandNode ni=do
     i0<-readIPort w (ni,0)
     i1<-readIPort w (ni,1)
@@ -299,16 +351,26 @@ execNodeAction w MuxNode ni=do
         BoolData False -> ioUpdateOPort w (ni,3) i_false
         _ -> ioUpdateOPort w (ni,3) EmptyData
 
-execNodeAction w EqualNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ eqD i0 i1
+-- array
+execNodeAction w LengthNode ni=do
+    ar<-readIPort w (ni,0)
+    ioUpdateOPort w (ni,1) $ lengthD ar
+
+execNodeAction w ConcatNode ni=do
+    ar<-readIPort w (ni,0)
+    ix<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ concatD ar ix
+
+execNodeAction w EncapNode ni=do
+    el<-readIPort w (ni,0)
+    ioUpdateOPort w (ni,2) $ encapD el
 
 execNodeAction w IndexNode ni=do
     ar<-readIPort w (ni,0)
     ix<-readIPort w (ni,1)
     ioUpdateOPort w (ni,2) $ indexD ar ix
 
+-- spatial
 execNodeAction w SearchNode ni=do
     p<-getNodePosition w ni
     i<-readIPort w (ni,0)
@@ -325,6 +387,17 @@ execNodeAction w SearchNode ni=do
                 (\x->S.member (fst $ fst x) niss || S.member (fst $ snd x) niss) $ map fst conns
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
+execNodeAction w LocateNode ni=do
+    sn<-readIPort w (ni,0)
+    case sn of
+        NodeData sn -> do
+            V.Vec2D x y<-getNodePosition w sn
+            ioUpdateOPort w (ni,1) $ FloatData x
+            ioUpdateOPort w (ni,2) $ FloatData y
+        _ -> do
+            ioUpdateOPort w (ni,1) $ EmptyData
+            ioUpdateOPort w (ni,2) $ EmptyData
+        
 execNodeAction w MoveNode ni=do
     tg<-readIPort w (ni,0)
     dx<-readIPort w (ni,1)
@@ -336,29 +409,21 @@ execNodeAction w MoveNode ni=do
             setNodePosition w tg $ p+V.Vec2D dx dy
         _ -> return ()
     
+-- structural
+execNodeAction w ConnectNode ni=do
+    sn<-readIPort w (ni,0)
+    sp<-readIPort w (ni,1)
+    dn<-readIPort w (ni,2)
+    dp<-readIPort w (ni,3)
+    case (sn,sp,dn,dp) of
+        (NodeData sn,IntData sp,NodeData dn,IntData dp) -> ioConnect w (sn,fromIntegral sp) (dn,fromIntegral dp)
+        _ -> return ()
 
-execNodeAction w (ReplicateNode False) ni=do
-    i<-readIPort w (ni,0)
-    case i of
-        NodeData ni -> do
-            (World nodes conns exts)<-readIORef w
-            case find ((==ni) . fst3) nodes of
-                Just (_,p,x) -> do
-                    dp<-liftM2 V.Vec2D randomNIO randomNIO
-                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,ReplicateNode True)) nodes)
-                        conns exts
-                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) x
-                    ioUpdateOPort w (ni,1) $ NodeData ni'
-                Nothing -> ioUpdateOPort w (ni,1) EmptyData
-        _ -> ioUpdateOPort w (ni,1) EmptyData
-
-execNodeAction w (ReplicateNode True) ni=do
-    i<-readIPort w (ni,0)
-    case i of
-        EmptyData -> do
-            World nodes conns exts<-readIORef w
-            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,ReplicateNode False)) nodes)
-                        conns exts
+execNodeAction w DisconnectNode ni=do
+    sn<-readIPort w (ni,0)
+    sp<-readIPort w (ni,1)
+    case (sn,sp) of
+        (NodeData sn,IntData sp) -> ioDisconnect w (sn,fromIntegral sp)
         _ -> return ()
 
 execNodeAction w (WrapNode False) ni=do
@@ -383,23 +448,40 @@ execNodeAction w (WrapNode True) ni=do
             writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,WrapNode False)) nodes)
                         conns exts
         _ -> return ()
+
+execNodeAction w (ReplicateNode False) ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        NodeData ni -> do
+            (World nodes conns exts)<-readIORef w
+            case find ((==ni) . fst3) nodes of
+                Just (_,p,x) -> do
+                    dp<-liftM2 V.Vec2D randomNIO randomNIO
+                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,ReplicateNode True)) nodes)
+                        conns exts
+                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) x
+                    ioUpdateOPort w (ni,1) $ NodeData ni'
+                Nothing -> ioUpdateOPort w (ni,1) EmptyData
+        _ -> ioUpdateOPort w (ni,1) EmptyData
+
+execNodeAction w (ReplicateNode True) ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        EmptyData -> do
+            World nodes conns exts<-readIORef w
+            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,ReplicateNode False)) nodes)
+                        conns exts
+        _ -> return ()
+    
 execNodeAction w DeleteNode ni=do
     i<-readIPort w (ni,0)
     case i of
         NodeData ni -> ioRemoveNode w ni
         _ -> return ()
 
-execNodeAction w ConnectNode ni=do
-    sn<-readIPort w (ni,0)
-    sp<-readIPort w (ni,1)
-    dn<-readIPort w (ni,2)
-    dp<-readIPort w (ni,3)
-    case (sn,sp,dn,dp) of
-        (NodeData sn,IntData sp,NodeData dn,IntData dp) -> ioConnect w (sn,fromIntegral sp) (dn,fromIntegral dp)
-        _ -> return ()
 
-            
-execNodeAction w _ _=return ()
+
+    
 
 
 
