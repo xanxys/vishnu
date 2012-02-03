@@ -377,9 +377,9 @@ execNodeAction w MoveNode ni=do
     dy<-readIPort w (ni,2)
     case (tg,extractFloat dx,extractFloat dy) of
         (NodeData tg,Just dx,Just dy) -> do
-            World nodes conns exts<-readIORef w
-            let Just (_,p,_)=find ((==tg) . fst3) nodes
-            setNodePosition w tg $ p+V.Vec2D dx dy
+            p<-getNodePosition w ni
+            dp<-randomN2IO
+            modifyNodePosition w tg $ p+dp+V.Vec2D dx dy
         _ -> return ()
     
 -- structural
@@ -389,7 +389,8 @@ execNodeAction w ConnectNode ni=do
     dn<-readIPort w (ni,2)
     dp<-readIPort w (ni,3)
     case (sn,sp,dn,dp) of
-        (NodeData sn,IntData sp,NodeData dn,IntData dp) -> ioConnect w (sn,fromIntegral sp) (dn,fromIntegral dp)
+        (NodeData sn,IntData sp,NodeData dn,IntData dp) -> ioConnect w
+            (sn,fromIntegral sp) (dn,fromIntegral dp)
         _ -> return ()
 
 execNodeAction w DisconnectNode ni=do
@@ -405,45 +406,33 @@ execNodeAction w (WrapNode False) ni=do
     case i of
         EmptyData -> ioUpdateOPort w (ni,1) EmptyData
         _ -> do
-            case find ((==ni) . fst3) nodes of
-                Just (_,p,_) -> do
-                    dp<-randomN2IO
-                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,WrapNode True)) nodes)
-                        conns exts
-                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) $ ConstNode i
-                    ioUpdateOPort w (ni,1) $ NodeData ni'
-                Nothing -> ioUpdateOPort w (ni,1) EmptyData
+            Just (p,_)<-getNode w ni
+            dp<-randomN2IO
+            ni'<-ioInsNormalNode w (p+V.map (*100) dp) $ ConstNode i    
+            ioUpdateOPort w (ni,1) $ NodeData ni'
+
 execNodeAction w (WrapNode True) ni=do
     i<-readIPort w (ni,0)
     case i of
-        EmptyData -> do
-            World nodes conns exts<-readIORef w
-            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,WrapNode False)) nodes)
-                        conns exts
+        EmptyData -> modifyNodeContent w ni $ WrapNode False
         _ -> return ()
 
 execNodeAction w (ReplicateNode False) ni=do
     i<-readIPort w (ni,0)
     case i of
-        NodeData ni -> do
-            (World nodes conns exts)<-readIORef w
-            case find ((==ni) . fst3) nodes of
-                Just (_,p,x) -> do
-                    dp<-randomN2IO
-                    writeIORef w $ World (map (\t@(i,_,_)->if i/=ni then t else (ni,p,ReplicateNode True)) nodes)
-                        conns exts
-                    ni'<-ioInsNormalNode w (p+V.map (*100) dp) x
-                    ioUpdateOPort w (ni,1) $ NodeData ni'
-                Nothing -> ioUpdateOPort w (ni,1) EmptyData
+        NodeData ni_src -> do
+            Just (_,x_src)<-getNode w ni_src
+            Just (p,_)<-getNode w ni
+            modifyNodeContent w ni $ ReplicateNode True
+            dp<-randomN2IO
+            ni'<-ioInsNormalNode w (p+V.map (*100) dp) x_src
+            ioUpdateOPort w (ni,1) $ NodeData ni'
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
 execNodeAction w (ReplicateNode True) ni=do
     i<-readIPort w (ni,0)
     case i of
-        EmptyData -> do
-            World nodes conns exts<-readIORef w
-            writeIORef w $ World (map (\t@(i,p,_)->if i/=ni then t else (ni,p,ReplicateNode False)) nodes)
-                        conns exts
+        EmptyData -> modifyNodeContent w ni $ ReplicateNode False
         _ -> return ()
     
 execNodeAction w DeleteNode ni=do
@@ -453,21 +442,29 @@ execNodeAction w DeleteNode ni=do
         _ -> return ()
 
 
-
-    
-
-
-
-getNodePosition w ni=do
+getNode :: IORef World -> NodeId -> IO (Maybe (V.Vec2D,Node))
+getNode w nid=do
     World nodes _ _<-readIORef w
-    let Just (_,p,_)=find ((==ni) . fst3) nodes
-    return p
+    case find ((==nid) . fst3) nodes of
+        Nothing -> return Nothing
+        Just (_,p,n) -> return $ Just (p,n)
 
-setNodePosition w ni p=do
+getNodePosition w nid=liftM (fst .fromJust)$ getNode w nid
+
+
+modifyNodeContent :: IORef World -> NodeId -> Node -> IO ()
+modifyNodeContent w nid n=do
     World nodes conns exts<-readIORef w
-    let nodes'=map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes
-    writeIORef w $ World nodes' conns exts
-    
+    writeIORef w $ World (map (\t@(i,p,_)->if i/=nid then t else (nid,p,n)) nodes) conns exts
+
+modifyNodePosition :: IORef World -> NodeId -> V.Vec2D -> IO ()    
+modifyNodePosition w ni p=do
+    World nodes conns exts<-readIORef w
+    writeIORef w $ World (map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes) conns exts
+
+
+
+
 
 
 
