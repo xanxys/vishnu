@@ -1,9 +1,10 @@
 -- | temporarily modified for experimenting with 2-d visual programming language
--- {-# LANGUAGE TemplateHaskell, QuasiQuotes, FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell, TypeSynonymInstances, FlexibleContexts #-}
 module IPR(iprView) where
 import Control.Arrow
 import Control.Concurrent
 import Control.Concurrent.MVar
+-- import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
 import qualified Data.Vec as V
@@ -28,31 +29,36 @@ iprView :: IO ()
 iprView=do
     initGUI
     
+    -- initialize UI strucutre
     window <- windowNew
     darea <- drawingAreaNew
-    
     set window [ containerBorderWidth := 10, containerChild := darea ]
-
     widgetModifyBg darea StateNormal (Color 0xffff 0xffff 0xffff)
     
+    -- create new world from file
     w<-newIORef emptyWorld
-    n0<-ioInsSpecialNode w (V.Vec2D 10 10) (IntData 0) "int src"
-    n1<-ioInsSpecialNode w (V.Vec2D 10 30) (IntData 0) "int src"
-    nadd<-ioInsNormalNode w (V.Vec2D 30 30) AddNode
-    n2<-ioInsSpecialNode w (V.Vec2D 50 50) EmptyData "sink"
-    ioConnect w (n0,0) (nadd,0)
-    ioConnect w (n1,0) (nadd,1)
-    ioConnect w (nadd,2) (n2,0)
+    printf "loading state from %s\n" path
+    (writeIORef w . read =<< readFile path) `catch` \e -> do
+        printf "load failed. creating default image\n"
+        
+        n0<-ioInsSpecialNode w (V.Vec2D 10 10) (IntData 0) "int src"
+        n1<-ioInsSpecialNode w (V.Vec2D 10 30) (IntData 0) "int src"
+        nadd<-ioInsNormalNode w (V.Vec2D 30 30) AddNode
+        n2<-ioInsSpecialNode w (V.Vec2D 50 50) EmptyData "sink"
+        ioConnect w (n0,0) (nadd,0)
+        ioConnect w (n1,0) (nadd,1)
+        ioConnect w (nadd,2) (n2,0)
+        
+        n0<-ioInsNormalNode w (V.Vec2D 50 100) (ConstNode $ FloatData 100)
+        n1<-ioInsNormalNode w (V.Vec2D 50 150) SearchNode
+        n2<-ioInsSpecialNode w (V.Vec2D 50 200) EmptyData "sink"
+        ioConnect w (n0,0) (n1,0)
+        ioConnect w (n1,1) (n2,0)
     
-    n0<-ioInsNormalNode w (V.Vec2D 50 100) (ConstNode $ FloatData 100)
-    n1<-ioInsNormalNode w (V.Vec2D 50 150) SearchNode
-    n2<-ioInsSpecialNode w (V.Vec2D 50 200) EmptyData "sink"
-    ioConnect w (n0,0) (n1,0)
-    ioConnect w (n1,1) (n2,0)
     cursor<-newIORef Idle
     
-    -- window close (somehow not working correctly)
-    window `on` destroyEvent $ tryEvent $ liftIO exitSuccess -- mainQuit
+    -- window close
+    onDestroy window $ mainQuit -- window `on` destroyEvent doesn't work 
     
     -- node control w/ mouse
     widgetAddEvents darea [PointerMotionMask]
@@ -62,7 +68,11 @@ iprView=do
     
     widgetShowAll window
     mainGUI
-
+    
+    -- save
+    printf "saving state to %s\n" path
+    writeFile path . show =<< readIORef w
+    where path="world.image"
 
 -- TODO: moving cursor position around is not clean...
 data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D 
@@ -73,7 +83,13 @@ data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D
 -- lookup node info from id: 
 -- 
 data World=World [(NodeId,V.Vec2D,Node)] [((PortDesc,PortDesc),Data)] [(NodeId,Data)]
+    deriving(Show,Read)
 
+instance Read V.Vec2D where
+    readsPrec n s=map (first $ uncurry V.Vec2D) $ readsPrec n s
+
+instance Show V.Vec2D where
+    show (V.Vec2D x y)=show (x,y)
 
 emptyWorld=World [] [] []
 
@@ -131,7 +147,7 @@ data Node
     |WrapNode -- * | Node (create ConstNode, since it's parametric)
     |ReplicateNode -- Node | Node
     |DeleteNode -- Node |
-    deriving(Show)
+    deriving(Show,Read)
 
 data Data
     =ArrayData [Data] -- N<2^31
@@ -140,7 +156,8 @@ data Data
     |NodeData NodeId
     |BoolData Bool
     |EmptyData
-    deriving(Show)
+    deriving(Show,Read)
+
 
 
 
@@ -165,13 +182,19 @@ nandD _ _=EmptyData
 
 
 
-data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord)
+data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord,Show,Read)
 
 generateNodeId :: IO NodeId
 generateNodeId=liftM2 NodeId randomIO randomIO
 
+{-
 instance Show NodeId where
     show (NodeId p0 p1)=printf "%016x%016x" p0 p1
+
+instance Read NodeId where
+    readsPrec _ s=[(NodeId (read $ "0x"++take 16 n) (read $ "0x"++drop 16 n),x)] -- TODO: exception
+        where (n,x)=splitAt 32 s
+-}
 
 instance Random Word64 where
     randomIO=liftM fromIntegral $ (randomRIO (0,0xffffffffffffffffffffffff) :: IO Integer)
@@ -486,12 +509,13 @@ press widget dragging w=do
             Grab ni -> drop ni
             ConnectFrom _ _ -> do
                 handled<-sequenceC $ map (conn pos) nodes
-                when handled $ widgetQueueDraw widget
+                unless handled $ cancelConn
+                widgetQueueDraw widget
             Idle -> do
                 handled<-sequenceC $ map (activate pos) nodes
                 when handled $ widgetQueueDraw widget
     where
-        startConn sp=writeIORef dragging $ ConnectFrom sp (V.Vec2D 0 0) -- TODO: hackish initial value
+        startConn sp cpos=writeIORef dragging $ ConnectFrom sp cpos
         cancelConn=writeIORef dragging $ Idle
         finishConn dp=do
             d<-readIORef dragging
@@ -504,9 +528,9 @@ press widget dragging w=do
         conn pos (nid,c,n)=sequenceC $ map (connPort (pos-c) nid) [0..5]
         
         
-        activate pos (nid,c,n)=checkPorts (pos-c) nid `chain` checkNode (pos-c) nid n
+        activate pos (nid,c,n)=checkPorts pos (pos-c) nid `chain` checkNode (pos-c) nid n
         
-        checkPorts d nid=sequenceC $ map (checkPort d nid) [0..5]
+        checkPorts cpos d nid=sequenceC $ map (checkPort cpos d nid) [0..5]
         
         connPort d nid pix=do
             let
@@ -517,7 +541,7 @@ press widget dragging w=do
                 then finishConn (nid,pix) >> return True
                 else return False
         
-        checkPort d nid pix=do
+        checkPort cpos d nid pix=do
             let
                 center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
                 theta=pi*0.1*fromIntegral pix
@@ -525,7 +549,7 @@ press widget dragging w=do
             if V.norm (center-d)<5
                 then do
                     ex<-portHasConnection w (nid,pix)
-                    if ex then ioDisconnect w (nid,pix) else startConn (nid,pix)
+                    if ex then ioDisconnect w (nid,pix) else startConn (nid,pix) cpos
                     return True
                 else return False
             
