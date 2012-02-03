@@ -73,13 +73,16 @@ data World=World [(NodeId,V.Vec2D,Node)] [((PortDesc,PortDesc),Data)] [(NodeId,D
 
 emptyWorld=World [] [] []
 
--- | operational model: (array is very different from others... since its size is not bounded)
+-- | operational model:
+-- (array is very different from others... since its size is not bounded)
 -- changing array to tuple won't help. they will just get bigger (because of overhead).
 --
--- data can be stored by FF or creating new constnode
+-- nodes are stateless. connections are.
+--
+-- data can be stored by FF or creating new ConstNode (by using WrapNode)
 --
 -- storage should be done in array of flip flops(length 1 delay line) or long delay line.
--- but let's not take that approach for now.
+-- but let's forget about that for now.
 --
 -- topology change cause "change" event to propagate downstream
 --
@@ -95,16 +98,16 @@ emptyWorld=World [] [] []
 -- port-port transfer takes O(1+distance * size of data) time
 --
 -- lots of primitives. but you should keep them under 100 or so.
--- nodes are stateless. connections are.
+--
 data Node
     =ConstNode Data -- | *
     |PrimNode String -- polymorphic node. wait. PrimNode isn't enough for everything?
     |TapNode -- * | *,*
-    |IdNode -- * | *
+--    |IdNode -- * | *
     -- arith
     |AddNode -- Num,Num | Num
     |MulNode -- Num, Num | Num
-    |CompareNode -- Num, Num | Bool
+    |CompareNode -- Num, Num | Bool (>=)
     |EqualNode -- Int, Int | Bool
     -- bool
     |NandNode -- Bool, Bool | Bool
@@ -118,13 +121,13 @@ data Node
     |SearchNode -- Float | [] [] (order undefined. but nearest-first is preferred)
     |LocateNode -- Node | Float, Float
     |MoveNode -- Node, Float, Float |
-    -- structural (you can't read existing connection information)
+    -- structural
     |ConnectNode -- Node, Int, Node, Int |
     |DisconnectNode -- Node, Int |
     |WrapNode -- * | Node (create ConstNode, since it's parametric)
     |ReplicateNode -- Node | Node
     |DeleteNode -- Node |
-
+    deriving(Show)
 
 data Data
     =ArrayData [Data] -- N<2^31
@@ -144,7 +147,17 @@ extractFloat _=Nothing
 
 addD (IntData x) (IntData y)=IntData $ x+y
 addD _ _=EmptyData
-    
+
+-- | only Int,Bool,Node can be compared for equality
+eqD (IntData x) (IntData y)=BoolData $ x==y
+eqD (BoolData x) (BoolData y)=BoolData $ x==y
+eqD (NodeData x) (NodeData y)=BoolData $ x==y
+eqD _ _=EmptyData
+
+
+nandD (BoolData x) (BoolData y)=BoolData $ not $ x&&y
+nandD _ _=EmptyData
+
 
 
 
@@ -176,7 +189,7 @@ ioUpdateOPort w port d=do
         Nothing -> return () -- no outgoing connection
         Just ((_,to),_) -> do
             writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
-            ioUpdateAnyIPort w $ fst to
+            ioUpdateAnyIPort w $ fst to -- make this asynchronous
     where f=(==port) . fst . fst
 
 
@@ -200,6 +213,30 @@ execNodeAction w AddNode ni=do
     i0<-readIPort w (ni,0)
     i1<-readIPort w (ni,1)
     ioUpdateOPort w (ni,2) $ addD i0 i1
+
+execNodeAction w TapNode ni=do
+    i<-readIPort w (ni,0)
+    ioUpdateOPort w (ni,1) i
+    ioUpdateOPort w (ni,2) i
+
+execNodeAction w NandNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ nandD i0 i1
+
+execNodeAction w MuxNode ni=do
+    cond<-readIPort w (ni,0)
+    i_true<-readIPort w (ni,1)
+    i_false<-readIPort w (ni,2)
+    case cond of
+        BoolData True -> ioUpdateOPort w (ni,3) i_true
+        BoolData False -> ioUpdateOPort w (ni,3) i_false
+        _ -> ioUpdateOPort w (ni,3) EmptyData
+
+execNodeAction w EqualNode ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ eqD i0 i1
 
 execNodeAction w SearchNode ni=do
     p<-getNodePosition w ni
@@ -319,6 +356,14 @@ ioConnect w s d=do
         _ -> return ()
     where c=(s,d)
 
+ioDisconnect :: IORef World -> PortDesc -> IO ()
+ioDisconnect w p=do
+    World nodes conns exts<-readIORef w
+    let dsts=map (fst . snd) $ filter (\(s,d)->s==p && d/=p) $ map fst conns
+    writeIORef w $ World
+        nodes (filter (\((s,d),_)->s/=p && d/=p) conns) exts
+    mapM_ (ioUpdateAnyIPort w) dsts
+
 draw :: DrawingArea -> IORef World -> EventM EExpose ()
 draw da w=liftIO $ do
     dw<-widgetGetDrawWindow da
@@ -327,21 +372,46 @@ draw da w=liftIO $ do
 
 renderWorld (World nodes conns exts)=do
     -- basic structure
-    setSourceRGB 0 0 0
-    mapM_ (\(_,V.Vec2D x y,_)->arc x y 2 0 (2*pi) >> fill) nodes
-    
-    let m=M.fromList $ map (\(i,p,n)->(i,(p,n))) nodes
-    mapM_ (\(((np,_),(nq,_)),_)->arrow (fst $ m M.! np) (fst $ m M.! nq)) conns
+    mapM_ node nodes
+    mapM_ (\((src,dst),_)->arrow (portPos src) (portPos dst)) conns
     
     -- extended  structure
     let me=M.fromList exts
     
     mapM_ (ext me) nodes
     where
+        m=M.fromList $ map (\(i,p,n)->(i,(p,n))) nodes
+        
+        portPos :: PortDesc -> V.Vec2D
+        portPos (n,pix)=fst (m M.! n)+V.map (*portRadius) (V.Vec2D (cos theta) (sin theta))
+            where theta=pi*0.1*fromIntegral pix
+        
+        portRadius=30
+        
         applyV f (V.Vec2D x y)=f x y
+        
+        node (nid,p,t)=do
+            -- center
+            setSourceRGB 0 0 0
+            (arc `applyV` p) 2 0 (2*pi)
+            fill
+            
+            -- desc
+            save
+            setSourceRGBA 0 0 0 0.5 
+            translate `applyV` (p+V.Vec2D 0 (-10))
+            showText $ show t
+            restore
+            
+            -- ports
+            setSourceRGBA 0 0 0 0.5 
+            mapM_ (\pix->(arc `applyV` (portPos (nid,pix))) 2 0 (2*pi) >> fill) [0..5]
+            
+        
         arrow from to=do
+            setSourceRGBA 0.1 0.1 1 0.8
             applyV moveTo from
-            applyV lineTo to
+            applyV lineTo  to
             stroke
             let
                 dir=normalizeV $ to-from
@@ -354,6 +424,7 @@ renderWorld (World nodes conns exts)=do
                 
             
         ext me (nid,V.Vec2D x y,PrimNode "int src")=do
+            setSourceRGB 0 0 0
             let IntData n=me M.! nid
             setLineWidth 1
             rectangle (x-30) (y-12.5) 60 25
@@ -363,6 +434,7 @@ renderWorld (World nodes conns exts)=do
             showText (show n)
             restore
         ext me (nid,V.Vec2D x y,PrimNode "sink")=do
+            setSourceRGB 0 0 0
             let d=me M.! nid
             setLineWidth 1
             rectangle (x-30) (y-12.5) 60 25
@@ -391,37 +463,37 @@ move widget d w=do
 
 press :: DrawingArea -> IORef (Maybe NodeId) -> IORef World -> EventM EButton ()
 press widget dragging w=do
-    pos<-eventCoordinates
+    pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
     liftIO $ do
         (World nodes _ _)<-readIORef w
-        mapM_ (check pos) nodes
+        dr<-readIORef dragging
+        case dr of
+            Just ni -> drop ni
+            Nothing -> handleSeq_ (activate pos) nodes
     where
-        check (px,py) (nid,V.Vec2D cx cy,PrimNode _)
-            |abs (px-cx)<5 && abs (py-cy)<5 = do
-                dr<-readIORef dragging
-                case dr of
-                    Just _ -> writeIORef dragging $ Nothing
-                    Nothing -> do
-                        (World nodes conns exts)<-readIORef w
-                        let
-                            exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
-                            Just ttt=find ((==nid) . fst) exts'
-                        writeIORef w $ World nodes conns exts'
-                        ioUpdateOPort w (nid,0) $ snd ttt
-                        widgetQueueDraw widget
-            |abs (px-cx)<30 && abs (py-cy)<12.5 = do
-                dr<-readIORef dragging
-                case dr of
-                    Nothing -> writeIORef dragging $ Just nid
-                    Just _ -> writeIORef dragging $ Nothing
-            |otherwise = return ()
-        check (px,py) (nid,V.Vec2D cx cy,n)
-            |abs (px-cx)<5 && abs (py-cy)<5 = do
-                dr<-readIORef dragging
-                case dr of
-                    Nothing -> writeIORef dragging $ Just nid
-                    Just _ -> writeIORef dragging $ Nothing
-            |otherwise = return ()
+        drop ni=writeIORef dragging Nothing
+        pick ni=writeIORef dragging $ Just ni
+        
+        handleSeq_ f []=return ()
+        handleSeq_ f (x:xs)=f x>>=flip unless (handleSeq_ f xs)
+        
+        activate pos (nid,c,n)=checkNode (pos-c) nid n
+        
+        checkNode (V.Vec2D dx dy) nid (PrimNode _)
+            |abs dx<5 && abs dy<5 = do
+                    (World nodes conns exts)<-readIORef w
+                    let
+                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
+                        Just ttt=find ((==nid) . fst) exts'
+                    writeIORef w $ World nodes conns exts'
+                    ioUpdateOPort w (nid,0) $ snd ttt
+                    widgetQueueDraw widget
+                    return True
+            |abs dx<30 && abs dy<12.5 = pick nid >> return True
+            |otherwise = return False
+        checkNode (V.Vec2D dx dy) nid _
+            |abs dx<5 && abs dy<5 = pick nid >> return True
+            |otherwise = return False
 
 
 fst3 (a,b,c)=a
