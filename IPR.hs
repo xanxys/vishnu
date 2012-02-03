@@ -15,6 +15,7 @@ import Data.IORef
 import Data.Word
 import Data.Int
 import Data.List
+import Data.Ord
 import Graphics.UI.Gtk hiding (Cursor)
 import Graphics.Rendering.Cairo
 import Text.Printf
@@ -41,19 +42,15 @@ iprView=do
     (writeIORef w . read =<< readFile path) `catch` \e -> do
         printf "load failed. creating default image\n"
         
-        n0<-ioInsSpecialNode w (V.Vec2D 10 10) (IntData 0) "int src"
-        n1<-ioInsSpecialNode w (V.Vec2D 10 30) (IntData 0) "int src"
-        nadd<-ioInsNormalNode w (V.Vec2D 30 30) AddNode
-        n2<-ioInsSpecialNode w (V.Vec2D 50 50) EmptyData "sink"
-        ioConnect w (n0,0) (nadd,0)
-        ioConnect w (n1,0) (nadd,1)
-        ioConnect w (nadd,2) (n2,0)
+        n0<-ioInsSpecialNode w (V.Vec2D 50 50) (IntData 0) "int src"
+        n1<-ioInsSpecialNode w (V.Vec2D 50 100) (IntData 0) "int src"
+        n2<-ioInsSpecialNode w (V.Vec2D 50 150) EmptyData "sink"
         
-        n0<-ioInsNormalNode w (V.Vec2D 50 100) (ConstNode $ FloatData 100)
-        n1<-ioInsNormalNode w (V.Vec2D 50 150) SearchNode
-        n2<-ioInsSpecialNode w (V.Vec2D 50 200) EmptyData "sink"
-        ioConnect w (n0,0) (n1,0)
-        ioConnect w (n1,1) (n2,0)
+        mapM_ (\(i,t)->ioInsNormalNode w (V.Vec2D 50 (200+fromIntegral i*50)) t)
+            $ zip [0..] [ConstNode $ IntData 1,ConstNode $ FloatData 0,ConstNode $ FloatData 100,
+                            AddNode,
+                            SearchNode,IndexNode,TapNode,
+                            ReplicateNode,WrapNode,MuxNode,EqualNode,NandNode]
     
     cursor<-newIORef Idle
     
@@ -179,7 +176,11 @@ eqD _ _=EmptyData
 nandD (BoolData x) (BoolData y)=BoolData $ not $ x&&y
 nandD _ _=EmptyData
 
-
+indexD (ArrayData xs) (IntData i)
+    |0<=i' && i'<length xs = xs!!i'
+    |otherwise = EmptyData
+    where i'=fromIntegral i
+indexD _ _=EmptyData
 
 
 data NodeId=NodeId !Word64 !Word64 deriving(Eq,Ord,Show,Read)
@@ -265,6 +266,11 @@ execNodeAction w EqualNode ni=do
     i1<-readIPort w (ni,1)
     ioUpdateOPort w (ni,2) $ eqD i0 i1
 
+execNodeAction w IndexNode ni=do
+    ar<-readIPort w (ni,0)
+    ix<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ indexD ar ix
+
 execNodeAction w SearchNode ni=do
     p<-getNodePosition w ni
     i<-readIPort w (ni,0)
@@ -272,7 +278,8 @@ execNodeAction w SearchNode ni=do
         FloatData radius -> do
             (World nodes conns _)<-readIORef w
             let
-                nis=map fst3 $ filter (\(_,q,_)->V.norm (p-q)<radius) nodes
+                nis=map snd $ takeWhile ((<radius) . fst) $
+                    sortBy (comparing fst) $ map (\(ni,q,_)->(V.norm (p-q),ni)) nodes
                 niss=S.fromList nis
             ioUpdateOPort w (ni,1) $ ArrayData $ map NodeData nis
             ioUpdateOPort w (ni,2) $ ArrayData $ map
@@ -300,7 +307,8 @@ execNodeAction w ReplicateNode ni=do
             case find ((==ni) . fst3) nodes of
                 Just (_,p,x) -> do
                     ni'<-generateNodeId
-                    writeIORef w $ World ((ni',p,x):nodes) conns exts
+                    dp<-liftM2 V.Vec2D randomNIO randomNIO
+                    writeIORef w $ World ((ni',p+V.map (*100) dp,x):nodes) conns exts
                     ioUpdateOPort w (ni,1) $ NodeData ni'
                 Nothing -> ioUpdateOPort w (ni,1) EmptyData
         _ -> ioUpdateOPort w (ni,1) EmptyData
@@ -475,7 +483,7 @@ renderWorld cursor (World nodes conns exts)=do
             stroke
             save
             translate x y
-            showText (show d)
+            showText (show d) -- problematic. show NodeId graphically and hide NodeId completely
             restore
         ext _ _=return ()
 
@@ -569,6 +577,14 @@ press widget dragging w=do
         checkNode (V.Vec2D dx dy) nid _
             |abs dx<5 && abs dy<5 = pick nid >> return True
             |otherwise = return False
+
+
+-- | Sample from the normal distribution
+randomNIO :: IO Double
+randomNIO=do
+    u<-randomRIO (0,1)
+    v<-randomRIO (0,1)
+    return $ sqrt (-2*log(u)) * cos (2*pi*v)
 
 
 sequenceC :: Monad m => [m Bool] -> m Bool
