@@ -22,7 +22,14 @@ import System.IO
 import System.Exit
 import System.Random
 
-
+-- it idle<->grab interface
+--
+-- plan 1. no ports
+-- store (children::[NodeId],[PortDesc],name::String) in exts.
+--  provide big circle centerd at CoM of children.
+--  
+--
+--
 
 iprView :: IO ()
 iprView=do
@@ -40,8 +47,8 @@ iprView=do
     (writeIORef w . read =<< readFile path) `catch` \e -> do
         printf "load failed. creating default image\n"
         
-        n0<-ioInsSpecialNode w (V.Vec2D 50 50) (IntData 0) "int src"
-        n1<-ioInsSpecialNode w (V.Vec2D 50 100) (IntData 0) "int src"
+        n0<-ioInsSpecialNode w (V.Vec2D 50 50) (IntData 0) "int upcount"
+        n1<-ioInsSpecialNode w (V.Vec2D 50 100) (IntData 0) "int upcount"
         n2<-ioInsSpecialNode w (V.Vec2D 50 150) EmptyData "sink"
         
         let n=10
@@ -65,6 +72,7 @@ iprView=do
     darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w
     darea `on` exposeEvent $ tryEvent $ draw darea cursor w
     darea `on` buttonPressEvent $ tryEvent $ press darea cursor w
+    darea `on` buttonReleaseEvent $ tryEvent $ release darea cursor w
     
     -- update
     idleAdd (seqStep1 w >>  return True) priorityDefaultIdle
@@ -79,7 +87,7 @@ iprView=do
     where path="world.image"
 
 -- TODO: moving cursor position around is not clean...
-data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D 
+data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D|Pan
 
 -- | desirable order:
 --  list all: O(N)
@@ -103,7 +111,7 @@ emptyWorld=World [] [] []
 -- changing array to tuple won't help. they will just get bigger (because of overhead).
 --
 -- nodes are stateless. connections are.
--- (WrapNode and ReplicateNode detects rising edge, so they actually have 1 bit state)
+-- (WrapNode and ReplicateNode detect rising edge, so they actually have 1 bit state)
 --
 -- data can be stored by FF or creating new ConstNode (by using WrapNode)
 --
@@ -271,14 +279,18 @@ ioUpdateOPort w port d=do
 execNodeAction w (ConstNode d) ni=
     ioUpdateOPort w (ni,0) d
 
-execNodeAction w (PrimNode "int src") ni=do
+execNodeAction w (PrimNode "int upcount") ni=do
     World _ _ exts<-readIORef w
     let Just x=lookup ni exts
     ioUpdateOPort w (ni,0) x
 
 execNodeAction w (PrimNode "sink") ni=do
     d<-readIPort w (ni,0)
-    modifyIORef w $ \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
+    modifyIORef w $
+        \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
+
+execNodeAction w (PrimNode "button") ni=do
+    ioUpdateOPort w (ni,0) $ BoolData False
 
 execNodeAction w (PrimNode name) _=do
     printf "unknown PrimNode: %s\n" name
@@ -289,31 +301,13 @@ execNodeAction w TapNode ni=do
     ioUpdateOPort w (ni,2) i
 
 -- arith
-execNodeAction w AddNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ addD i0 i1
-
-execNodeAction w MulNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ mulD i0 i1
-
-execNodeAction w CompareNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ cmpD i0 i1
-
-execNodeAction w EqualNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ eqD i0 i1
+execNodeAction w AddNode ni=pure2i1o addD w ni
+execNodeAction w MulNode ni=pure2i1o mulD w ni
+execNodeAction w CompareNode ni=pure2i1o cmpD w ni
+execNodeAction w EqualNode ni=pure2i1o eqD w ni
 
 -- bool
-execNodeAction w NandNode ni=do
-    i0<-readIPort w (ni,0)
-    i1<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ nandD i0 i1
+execNodeAction w NandNode ni=pure2i1o nandD w ni
 
 execNodeAction w MuxNode ni=do
     cond<-readIPort w (ni,0)
@@ -325,23 +319,10 @@ execNodeAction w MuxNode ni=do
         _ -> ioUpdateOPort w (ni,3) EmptyData
 
 -- array
-execNodeAction w LengthNode ni=do
-    ar<-readIPort w (ni,0)
-    ioUpdateOPort w (ni,1) $ lengthD ar
-
-execNodeAction w ConcatNode ni=do
-    ar<-readIPort w (ni,0)
-    ix<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ concatD ar ix
-
-execNodeAction w EncapNode ni=do
-    el<-readIPort w (ni,0)
-    ioUpdateOPort w (ni,2) $ encapD el
-
-execNodeAction w IndexNode ni=do
-    ar<-readIPort w (ni,0)
-    ix<-readIPort w (ni,1)
-    ioUpdateOPort w (ni,2) $ indexD ar ix
+execNodeAction w LengthNode ni=pure1i1o lengthD w ni
+execNodeAction w ConcatNode ni=pure2i1o concatD w ni
+execNodeAction w EncapNode ni=pure1i1o encapD w ni
+execNodeAction w IndexNode ni=pure2i1o indexD w ni
 
 -- spatial
 execNodeAction w SearchNode ni=do
@@ -463,7 +444,14 @@ modifyNodePosition w ni p=do
     writeIORef w $ World (map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes) conns exts
 
 
+pure1i1o f w ni=do
+    i0<-readIPort w (ni,0)
+    ioUpdateOPort w (ni,1) $ f i0
 
+pure2i1o f w ni=do
+    i0<-readIPort w (ni,0)
+    i1<-readIPort w (ni,1)
+    ioUpdateOPort w (ni,2) $ f i0 i1
 
 
 
@@ -583,22 +571,20 @@ renderWorld cursor (World nodes conns exts)=do
             fill
                 
             
-        ext me (nid,V.Vec2D x y,PrimNode "int src")=do
+        ext me (nid,V.Vec2D x y,PrimNode "int upcount")=do
+            setSourceRGBA 0 1 0 0.2
+            arc x y 20 0 (2*pi)
+            fill
+            
             setSourceRGB 0 0 0
-            let IntData n=me M.! nid
-            setLineWidth 1
-            rectangle (x-30) (y-12.5) 60 25
-            stroke
             save
             translate x y
+            let IntData n=me M.! nid
             showText (show n)
             restore
         ext me (nid,V.Vec2D x y,PrimNode "sink")=do
             setSourceRGB 0 0 0
             let d=me M.! nid
-            setLineWidth 1
-            rectangle (x-30) (y-12.5) 60 25
-            stroke
             save
             translate x y
             showText (show d) -- problematic. show NodeId graphically and hide NodeId completely
@@ -678,10 +664,14 @@ press widget dragging w=do
                     if ex then ioDisconnect w (nid,pix) else startConn (nid,pix) cpos
                     return True
                 else return False
-            
         
-        checkNode (V.Vec2D dx dy) nid (PrimNode _)
-            |abs dx<5 && abs dy<5 = do
+        -- Idle
+        checkNode p nid n
+            |V.norm p<5 = pick nid >> return True
+            |otherwise = checkNodeSpecial p nid n
+        
+        checkNodeSpecial p nid (PrimNode "int upcount")
+            |V.norm p<20  =do
                     (World nodes conns exts)<-readIORef w
                     let
                         exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
@@ -690,17 +680,23 @@ press widget dragging w=do
                     ioUpdateOPort w (nid,0) $ snd ttt
                     widgetQueueDraw widget
                     return True
-            |abs dx<30 && abs dy<12.5 = pick nid >> return True
             |otherwise = return False
-        checkNode (V.Vec2D dx dy) nid _
-            |abs dx<5 && abs dy<5 = pick nid >> return True
+        checkNodeSpecial p nid (PrimNode "button")
+            |V.norm p<20 = do
+                return True
             |otherwise = return False
+        checkNodeSpecial _ _ _=return False
 
+
+release :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
+release darea cursor w=do
+    
+    return ()
 
 -- | Sample from 2d normal distribution
 randomN2IO=liftM2 V.Vec2D randomNIO randomNIO
 
--- | Sample from the normal distribution
+-- | Sample from 1d normal distribution
 randomNIO :: IO Double
 randomNIO=do
     u<-randomRIO (0,1)
