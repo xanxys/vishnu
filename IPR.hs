@@ -49,7 +49,7 @@ iprView=do
         
         n0<-ioInsSpecialNode w (V.Vec2D 50 50) (IntData 0) "int upcount"
         n1<-ioInsSpecialNode w (V.Vec2D 50 100) (IntData 0) "int upcount"
-        n2<-ioInsSpecialNode w (V.Vec2D 50 150) EmptyData "sink"
+        n2<-ioInsSpecialNode w (V.Vec2D 50 150) EmptyData "display"
         
         let n=10
         mapM_ (\(i,t)->ioInsNormalNode w
@@ -62,6 +62,7 @@ iprView=do
                             SearchNode,LocateNode,MoveNode,
                             ConnectNode,DisconnectNode,WrapNode False,ReplicateNode False,DeleteNode]
     
+--    ioInsSpecialNode w (V.Vec2D 100 100) (BoolData False) "button"
     cursor<-newIORef Idle
     
     -- window close
@@ -69,10 +70,10 @@ iprView=do
     
     -- node control w/ mouse
     widgetAddEvents darea [PointerMotionMask]
-    darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w
     darea `on` exposeEvent $ tryEvent $ draw darea cursor w
-    darea `on` buttonPressEvent $ tryEvent $ press darea cursor w
-    darea `on` buttonReleaseEvent $ tryEvent $ release darea cursor w
+    darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w >> liftIO (widgetQueueDraw darea)
+    darea `on` buttonPressEvent $ tryEvent $ press darea cursor w >> liftIO (widgetQueueDraw darea)
+    darea `on` buttonReleaseEvent $ tryEvent $ release darea cursor w >> liftIO (widgetQueueDraw darea)
     
     -- update
     idleAdd (seqStep1 w >>  return True) priorityDefaultIdle
@@ -284,13 +285,15 @@ execNodeAction w (PrimNode "int upcount") ni=do
     let Just x=lookup ni exts
     ioUpdateOPort w (ni,0) x
 
-execNodeAction w (PrimNode "sink") ni=do
+execNodeAction w (PrimNode "button") ni=do
+    World _ _ exts<-readIORef w
+    let Just x=lookup ni exts
+    ioUpdateOPort w (ni,0) x
+
+execNodeAction w (PrimNode "display") ni=do
     d<-readIPort w (ni,0)
     modifyIORef w $
         \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
-
-execNodeAction w (PrimNode "button") ni=do
-    ioUpdateOPort w (ni,0) $ BoolData False
 
 execNodeAction w (PrimNode name) _=do
     printf "unknown PrimNode: %s\n" name
@@ -571,23 +574,28 @@ renderWorld cursor (World nodes conns exts)=do
             fill
                 
             
-        ext me (nid,V.Vec2D x y,PrimNode "int upcount")=do
+        ext me (nid,p,PrimNode "int upcount")=do
             setSourceRGBA 0 1 0 0.2
-            arc x y 20 0 (2*pi)
+            (arc `applyV` p) 20 0 (2*pi)
             fill
             
             setSourceRGB 0 0 0
             save
-            translate x y
+            translate `applyV` p
             let IntData n=me M.! nid
             showText (show n)
             restore
-        ext me (nid,V.Vec2D x y,PrimNode "sink")=do
+        ext me (nid,p,PrimNode "button")=do
+            let BoolData b=me M.! nid
+            setSourceRGBA 0 1 0 $ if b then 0.8 else 0.2
+            (arc `applyV` p) 20 0 (2*pi)
+            fill
+        ext me (nid,p,PrimNode "display")=do
             setSourceRGB 0 0 0
             let d=me M.! nid
             save
-            translate x y
-            showText (show d) -- problematic. show NodeId graphically and hide NodeId completely
+            translate `applyV` p
+            showText (show d) -- TODO: hide NodeId intn. representation completely by visualizing them as arrows
             restore
         ext _ _=return ()
 
@@ -605,11 +613,9 @@ move widget cursor w=do
             (World nodes conns exts)<-liftIO $ readIORef w
             let nodes'=map (\t@(i,pos,n)->if nid/=i then t else (i,V.Vec2D px py,n)) nodes
             liftIO $ writeIORef w $ World nodes' conns exts
-            liftIO $ widgetQueueDraw widget
         ConnectFrom srcport pos -> do
             (px,py)<-eventCoordinates
             liftIO $ writeIORef cursor $ ConnectFrom srcport $ V.Vec2D px py
-            liftIO $ widgetQueueDraw widget
 
 press :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
 press widget dragging w=do
@@ -622,10 +628,7 @@ press widget dragging w=do
             ConnectFrom _ _ -> do
                 handled<-sequenceC $ map (conn pos) nodes
                 unless handled $ cancelConn
-                widgetQueueDraw widget
-            Idle -> do
-                handled<-sequenceC $ map (activate pos) nodes
-                when handled $ widgetQueueDraw widget
+            Idle -> void $ sequenceC $ map (activate pos) nodes
     where
         startConn sp cpos=writeIORef dragging $ ConnectFrom sp cpos
         cancelConn=writeIORef dragging $ Idle
@@ -677,21 +680,42 @@ press widget dragging w=do
                         exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
                         Just ttt=find ((==nid) . fst) exts'
                     writeIORef w $ World nodes conns exts'
-                    ioUpdateOPort w (nid,0) $ snd ttt
-                    widgetQueueDraw widget
                     return True
             |otherwise = return False
         checkNodeSpecial p nid (PrimNode "button")
             |V.norm p<20 = do
-                return True
+                    (World nodes conns exts)<-readIORef w
+                    let
+                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,BoolData True)) exts
+                        Just ttt=find ((==nid) . fst) exts'
+                    writeIORef w $ World nodes conns exts'
+                    return True
             |otherwise = return False
         checkNodeSpecial _ _ _=return False
 
 
 release :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
 release darea cursor w=do
-    
-    return ()
+    pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
+    liftIO $ do
+        (World nodes _ _)<-readIORef w
+        c<-readIORef cursor
+        case c of
+            Idle -> void $ sequenceC $ map (activate pos) nodes
+            _ -> return ()
+    where
+        activate pos (nid,c,n)=checkNodeSpecial (pos-c) nid n
+        
+        checkNodeSpecial p nid (PrimNode "button")
+            |V.norm p<20 = do
+                    (World nodes conns exts)<-readIORef w
+                    let
+                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,BoolData False)) exts
+                        Just ttt=find ((==nid) . fst) exts'
+                    writeIORef w $ World nodes conns exts'
+                    return True
+            |otherwise = return False
+        checkNodeSpecial _ _ _=return False
 
 -- | Sample from 2d normal distribution
 randomN2IO=liftM2 V.Vec2D randomNIO randomNIO
