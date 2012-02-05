@@ -21,6 +21,7 @@ import Text.Printf
 import System.IO
 import System.Exit
 import System.Random
+import Data.Time
 
 -- it idle<->grab interface
 --
@@ -69,14 +70,17 @@ iprView=do
     onDestroy window $ mainQuit -- window `on` destroyEvent doesn't work 
     
     -- node control w/ mouse
+    msg_count<-newRateCounter
+    
     widgetAddEvents darea [PointerMotionMask]
-    darea `on` exposeEvent $ tryEvent $ draw darea cursor w
+    darea `on` exposeEvent $ tryEvent $ liftIO (summary msg_count >>= drawDebugString darea)
+         >> draw darea cursor w
     darea `on` motionNotifyEvent $ tryEvent $ move darea cursor w >> liftIO (widgetQueueDraw darea)
     darea `on` buttonPressEvent $ tryEvent $ press darea cursor w >> liftIO (widgetQueueDraw darea)
     darea `on` buttonReleaseEvent $ tryEvent $ release darea cursor w >> liftIO (widgetQueueDraw darea)
     
     -- update
-    idleAdd (seqStep1 w >>  return True) priorityDefaultIdle
+    idleAdd (count msg_count >> seqStep1 w >>  return True) priorityDefaultIdle
     timeoutAdd (widgetQueueDraw darea >> return True) 100
     
     widgetShowAll window
@@ -86,6 +90,29 @@ iprView=do
     printf "saving state to %s\n" path
     writeFile path . show =<< readIORef w
     where path="world.image"
+
+
+-- | count total number of events and rate of events. # is limited by Int
+data RateCount=RateCount (MVar (Integer,Int,UTCTime))
+
+newRateCounter :: IO RateCount
+newRateCounter=do
+    t0<-getCurrentTime
+    liftM RateCount $ newMVar (0,0,t0)
+
+count :: RateCount -> IO ()
+count (RateCount mv)=modifyMVar_ mv $ \(acc,d,t)->return (acc+1,d+1,t)
+
+summary :: RateCount -> IO String
+summary (RateCount mv)=do
+    (acc,d,t0)<-takeMVar mv
+    t1<-getCurrentTime
+    putMVar mv $ (acc,0,t1)
+    let r=fromIntegral d/realToFrac (t1 `diffUTCTime` t0) :: Double
+    return $ printf "throughput:%.2f/sec total: %d" r acc
+
+
+
 
 -- TODO: moving cursor position around is not clean...
 data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D|Pan
@@ -510,6 +537,17 @@ ioDisconnect w p=do
     writeIORef w $ World
         nodes (filter (\((s,d),_)->s/=p && d/=p) conns) exts
 
+drawDebugString :: DrawingArea -> String -> IO ()
+drawDebugString da s= do
+    dw<-widgetGetDrawWindow da
+    renderWithDrawable dw $ do
+        setSourceRGBA 0 0 0 0.5
+        save
+        translate 5 15
+        showText s
+        restore
+
+
 draw :: DrawingArea ->  IORef Cursor -> IORef World -> EventM EExpose ()
 draw da cursor w=liftIO $ do
     dw<-widgetGetDrawWindow da
@@ -582,17 +620,17 @@ renderWorld cursor (World nodes conns exts)=do
             setSourceRGB 0 0 0
             save
             translate `applyV` p
-            let IntData n=me M.! nid
+            let IntData n=M.findWithDefault EmptyData nid me -- TODO inappropriate default value?
             showText (show n)
             restore
         ext me (nid,p,PrimNode "button")=do
-            let BoolData b=me M.! nid
+            let BoolData b=M.findWithDefault EmptyData nid me
             setSourceRGBA 0 1 0 $ if b then 0.8 else 0.2
             (arc `applyV` p) 20 0 (2*pi)
             fill
         ext me (nid,p,PrimNode "display")=do
             setSourceRGB 0 0 0
-            let d=me M.! nid
+            let d=M.findWithDefault EmptyData nid me
             save
             translate `applyV` p
             showText (show d) -- TODO: hide NodeId intn. representation completely by visualizing them as arrows
@@ -676,6 +714,7 @@ press widget dragging w=do
         checkNodeSpecial p nid (PrimNode "int upcount")
             |V.norm p<20  =do
                     (World nodes conns exts)<-readIORef w
+                    -- TODO: ?
                     let
                         exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
                         Just ttt=find ((==nid) . fst) exts'
