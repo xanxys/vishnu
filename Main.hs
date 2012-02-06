@@ -18,8 +18,8 @@ import Graphics.UI.Gtk hiding (Cursor)
 import Graphics.Rendering.Cairo
 import Text.Printf
 import System.IO
-import System.Exit
 import System.Random
+import System.Environment
 import Data.Time
 
 -- it idle<->grab interface
@@ -31,6 +31,8 @@ import Data.Time
 main :: IO ()
 main=do
     initGUI
+    
+    nodes<-liftM parseAddition getArgs
     
     -- initialize UI strucutre
     window <- windowNew
@@ -59,7 +61,10 @@ main=do
                             SearchNode,LocateNode,MoveNode,
                             ConnectNode,DisconnectNode,WrapNode False,ReplicateNode False,DeleteNode]
     
---    ioInsSpecialNode w (V.Vec2D 100 100) (BoolData False) "button"
+    -- add elements specified in command line
+    mapM (\add_n->randomN2IO >>= add_n w . (+V.Vec2D 300 300) . (V.map (*100))) nodes
+    
+    -- create cursor state
     cursor<-newIORef $ Cursor (V.Vec2D 0 0) Idle
     
     -- window close
@@ -76,7 +81,7 @@ main=do
     darea `on` buttonReleaseEvent $ tryEvent $ release darea cursor w >> liftIO (widgetQueueDraw darea)
     
     -- update
-    idleAdd (count msg_count >> seqStep1 w >>  return True) priorityDefaultIdle
+    idleAdd (count msg_count >> seqStep1 cursor w >>  return True) priorityDefaultIdle
     timeoutAdd (widgetQueueDraw darea >> return True) 100
     
     widgetShowAll window
@@ -87,6 +92,9 @@ main=do
     writeFile path . show =<< readIORef w
     where path="world.image"
 
+parseAddition ("--add":x:xs)=(\w p->ioInsNormalNode w p (read x)):parseAddition xs
+parseAddition ("--add_sp":x:xs)=(\w p->ioInsSpecialNode w p EmptyData x):parseAddition xs
+parseAddition _=[]
 
 -- | count total number of events and rate of events. # is limited by Int
 data RateCount=RateCount (MVar (Integer,Int,UTCTime))
@@ -270,8 +278,8 @@ type PortId=Int
 
 
 -- approximate area-proprtional calculation by selecting nearest node from randomly sampled point
-seqStep1 :: IORef World -> IO ()
-seqStep1 w=do
+seqStep1 :: IORef Cursor -> IORef World -> IO ()
+seqStep1 c w=do
     (World nodes conns exts)<-readIORef w
     let
         n=length nodes
@@ -289,7 +297,7 @@ seqStep1 w=do
         let p=V.Vec2D x y
         
         let (ni,_,n)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
-        execNodeAction w n ni
+        execNodeAction c w n ni
 
 
 ioUpdateOPort :: IORef World -> PortDesc -> Data -> IO ()
@@ -301,51 +309,58 @@ ioUpdateOPort w port d=do
             writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
     where f=(==port) . fst . fst
 
-
-execNodeAction w (ConstNode d) ni=
+-- TODO: IORef Cursor -> Interface
+execNodeAction :: IORef Cursor -> IORef World -> Node -> NodeId -> IO ()
+execNodeAction _ w (ConstNode d) ni=
     ioUpdateOPort w (ni,0) d
 
-execNodeAction w (PrimNode "int upcount") ni=do
+execNodeAction _ w (PrimNode "int upcount") ni=do
     World _ _ exts<-readIORef w
     let Just x=lookup ni exts
     ioUpdateOPort w (ni,0) x
 
-execNodeAction w (PrimNode "button") ni=do
+execNodeAction _ w (PrimNode "button") ni=do
     World _ _ exts<-readIORef w
     let Just x=lookup ni exts
     ioUpdateOPort w (ni,0) x
 
-execNodeAction w (PrimNode "display") ni=do
+execNodeAction _ w (PrimNode "display") ni=do
     d<-readIPort w (ni,0)
     modifyIORef w $
         \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
     
-execNodeAction w (PrimNode "cursor") ni=do
+execNodeAction c w (PrimNode "cursor") ni=do
     i<-readIPort w (ni,0)
+    p<-getNodePosition w ni
+    Cursor cpos _<-readIORef c
     case i of
-        FloatData radius -> do
-            return ()
-        
+        FloatData radius ->
+            if V.norm (cpos-p)<radius then let V.Vec2D dx dy=cpos-p in do
+                ioUpdateOPort w (ni,1) (FloatData dx)
+                ioUpdateOPort w (ni,2) (FloatData dy)
+            else do
+                ioUpdateOPort w (ni,1) EmptyData
+                ioUpdateOPort w (ni,2) EmptyData
         _ -> return ()
 
-execNodeAction w (PrimNode name) _=do
+execNodeAction _ w (PrimNode name) _=do
     printf "unknown PrimNode: %s\n" name
 
-execNodeAction w TapNode ni=do
+execNodeAction _ w TapNode ni=do
     i<-readIPort w (ni,0)
     ioUpdateOPort w (ni,1) i
     ioUpdateOPort w (ni,2) i
 
 -- arith
-execNodeAction w AddNode ni=pure2i1o addD w ni
-execNodeAction w MulNode ni=pure2i1o mulD w ni
-execNodeAction w CompareNode ni=pure2i1o cmpD w ni
-execNodeAction w EqualNode ni=pure2i1o eqD w ni
+execNodeAction _ w AddNode ni=pure2i1o addD w ni
+execNodeAction _ w MulNode ni=pure2i1o mulD w ni
+execNodeAction _ w CompareNode ni=pure2i1o cmpD w ni
+execNodeAction _ w EqualNode ni=pure2i1o eqD w ni
 
 -- bool
-execNodeAction w NandNode ni=pure2i1o nandD w ni
+execNodeAction _ w NandNode ni=pure2i1o nandD w ni
 
-execNodeAction w MuxNode ni=do
+execNodeAction _ w MuxNode ni=do
     cond<-readIPort w (ni,0)
     i_true<-readIPort w (ni,1)
     i_false<-readIPort w (ni,2)
@@ -355,13 +370,13 @@ execNodeAction w MuxNode ni=do
         _ -> ioUpdateOPort w (ni,3) EmptyData
 
 -- array
-execNodeAction w LengthNode ni=pure1i1o lengthD w ni
-execNodeAction w ConcatNode ni=pure2i1o concatD w ni
-execNodeAction w EncapNode ni=pure1i1o encapD w ni
-execNodeAction w IndexNode ni=pure2i1o indexD w ni
+execNodeAction _ w LengthNode ni=pure1i1o lengthD w ni
+execNodeAction _ w ConcatNode ni=pure2i1o concatD w ni
+execNodeAction _ w EncapNode ni=pure1i1o encapD w ni
+execNodeAction _ w IndexNode ni=pure2i1o indexD w ni
 
 -- spatial
-execNodeAction w SearchNode ni=do
+execNodeAction _ w SearchNode ni=do
     p<-getNodePosition w ni
     i<-readIPort w (ni,0)
     case i of
@@ -377,7 +392,7 @@ execNodeAction w SearchNode ni=do
                 (\x->S.member (fst $ fst x) niss || S.member (fst $ snd x) niss) $ map fst conns
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
-execNodeAction w LocateNode ni=do
+execNodeAction _ w LocateNode ni=do
     sn<-readIPort w (ni,0)
     case sn of
         NodeData sn -> do
@@ -388,7 +403,7 @@ execNodeAction w LocateNode ni=do
             ioUpdateOPort w (ni,1) $ EmptyData
             ioUpdateOPort w (ni,2) $ EmptyData
         
-execNodeAction w MoveNode ni=do
+execNodeAction _ w MoveNode ni=do
     tg<-readIPort w (ni,0)
     dx<-readIPort w (ni,1)
     dy<-readIPort w (ni,2)
@@ -400,7 +415,7 @@ execNodeAction w MoveNode ni=do
         _ -> return ()
     
 -- structural
-execNodeAction w ConnectNode ni=do
+execNodeAction _ w ConnectNode ni=do
     sn<-readIPort w (ni,0)
     sp<-readIPort w (ni,1)
     dn<-readIPort w (ni,2)
@@ -410,14 +425,14 @@ execNodeAction w ConnectNode ni=do
             (sn,fromIntegral sp) (dn,fromIntegral dp)
         _ -> return ()
 
-execNodeAction w DisconnectNode ni=do
+execNodeAction _ w DisconnectNode ni=do
     sn<-readIPort w (ni,0)
     sp<-readIPort w (ni,1)
     case (sn,sp) of
         (NodeData sn,IntData sp) -> ioDisconnect w (sn,fromIntegral sp)
         _ -> return ()
 
-execNodeAction w (WrapNode False) ni=do
+execNodeAction _ w (WrapNode False) ni=do
     i<-readIPort w (ni,0)
     (World nodes conns exts)<-readIORef w
     case i of
@@ -428,13 +443,13 @@ execNodeAction w (WrapNode False) ni=do
             ni'<-ioInsNormalNode w (p+V.map (*100) dp) $ ConstNode i    
             ioUpdateOPort w (ni,1) $ NodeData ni'
 
-execNodeAction w (WrapNode True) ni=do
+execNodeAction _ w (WrapNode True) ni=do
     i<-readIPort w (ni,0)
     case i of
         EmptyData -> modifyNodeContent w ni $ WrapNode False
         _ -> return ()
 
-execNodeAction w (ReplicateNode False) ni=do
+execNodeAction _ w (ReplicateNode False) ni=do
     i<-readIPort w (ni,0)
     case i of
         NodeData ni_src -> do
@@ -446,13 +461,13 @@ execNodeAction w (ReplicateNode False) ni=do
             ioUpdateOPort w (ni,1) $ NodeData ni'
         _ -> ioUpdateOPort w (ni,1) EmptyData
 
-execNodeAction w (ReplicateNode True) ni=do
+execNodeAction _ w (ReplicateNode True) ni=do
     i<-readIPort w (ni,0)
     case i of
         EmptyData -> modifyNodeContent w ni $ ReplicateNode False
         _ -> return () -- TODO: ReplicateNode (Maybe NodeId) is preferrable?
     
-execNodeAction w DeleteNode ni=do
+execNodeAction _ w DeleteNode ni=do
     i<-readIPort w (ni,0)
     case i of
         NodeData ni -> ioRemoveNode w ni
@@ -582,8 +597,6 @@ renderWorld cursor (World nodes conns exts)=do
             where theta=pi*0.1*fromIntegral pix
         
         portRadius=30
-        
-        applyV f (V.Vec2D x y)=f x y
         
         node (nid,p,t)=do
             -- center
@@ -759,6 +772,9 @@ release darea cursor w=do
                     return True
             |otherwise = return False
         checkNodeSpecial _ _ _=return False
+
+
+applyV f (V.Vec2D x y)=f x y
 
 -- | Sample from 2d normal distribution
 randomN2IO=liftM2 V.Vec2D randomNIO randomNIO
