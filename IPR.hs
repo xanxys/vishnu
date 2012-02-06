@@ -29,9 +29,6 @@ import Data.Time
 -- store (children::[NodeId],[PortDesc],name::String) in exts.
 --  provide big circle centerd at CoM of children.
 --  
---
---
-
 iprView :: IO ()
 iprView=do
     initGUI
@@ -64,7 +61,7 @@ iprView=do
                             ConnectNode,DisconnectNode,WrapNode False,ReplicateNode False,DeleteNode]
     
 --    ioInsSpecialNode w (V.Vec2D 100 100) (BoolData False) "button"
-    cursor<-newIORef Idle
+    cursor<-newIORef $ Cursor (V.Vec2D 0 0) Idle
     
     -- window close
     onDestroy window $ mainQuit -- window `on` destroyEvent doesn't work 
@@ -114,8 +111,10 @@ summary (RateCount mv)=do
 
 
 
--- TODO: moving cursor position around is not clean...
-data Cursor=Idle|Grab NodeId|ConnectFrom PortDesc V.Vec2D|Pan
+-- bare with the position, since gtk doesn't (seem to) provide cursor position outside of EventM monad.
+data Cursor=Cursor V.Vec2D CursorState
+
+data CursorState=Idle|Grab NodeId|ConnectFrom PortDesc|Pan
 
 -- | desirable order:
 --  list all: O(N)
@@ -321,6 +320,14 @@ execNodeAction w (PrimNode "display") ni=do
     d<-readIPort w (ni,0)
     modifyIORef w $
         \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
+    
+execNodeAction w (PrimNode "cursor") ni=do
+    i<-readIPort w (ni,0)
+    case i of
+        FloatData radius -> do
+            return ()
+        
+        _ -> return ()
 
 execNodeAction w (PrimNode name) _=do
     printf "unknown PrimNode: %s\n" name
@@ -444,7 +451,7 @@ execNodeAction w (ReplicateNode True) ni=do
     i<-readIPort w (ni,0)
     case i of
         EmptyData -> modifyNodeContent w ni $ ReplicateNode False
-        _ -> return ()
+        _ -> return () -- TODO: ReplicateNode (Maybe NodeId) is preferrable?
     
 execNodeAction w DeleteNode ni=do
     i<-readIPort w (ni,0)
@@ -561,7 +568,7 @@ renderWorld cursor (World nodes conns exts)=do
     mapM_ (\((src,dst),_)->arrow (portPos src) (portPos dst)) conns
     
     case cursor of
-        ConnectFrom src cpos -> arrow (portPos src)  cpos
+        Cursor cpos (ConnectFrom src) -> arrow (portPos src)  cpos
         _ -> return ()
     
     -- extended  structure
@@ -643,17 +650,16 @@ rotateCCW (V.Vec2D x y)=V.Vec2D (-y) x
 
 move :: DrawingArea -> IORef Cursor -> IORef World -> EventM EMotion ()
 move widget cursor w=do
-    cst<-liftIO $ readIORef cursor
+    Cursor _ cst<-liftIO $ readIORef cursor
+    pos<-liftM (uncurry V.Vec2D) eventCoordinates
     case cst of
-        Idle -> return ()
+        -- TODO replace Grab behavior w/ in-system code
         Grab nid -> do
-            (px,py)<-eventCoordinates
             (World nodes conns exts)<-liftIO $ readIORef w
-            let nodes'=map (\t@(i,pos,n)->if nid/=i then t else (i,V.Vec2D px py,n)) nodes
+            let nodes'=map (\t@(i,_,n)->if nid/=i then t else (i,pos,n)) nodes
             liftIO $ writeIORef w $ World nodes' conns exts
-        ConnectFrom srcport pos -> do
-            (px,py)<-eventCoordinates
-            liftIO $ writeIORef cursor $ ConnectFrom srcport $ V.Vec2D px py
+        _ -> return ()
+    liftIO $ writeIORef cursor $ Cursor pos cst
 
 press :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
 press widget dragging w=do
@@ -662,21 +668,20 @@ press widget dragging w=do
         (World nodes _ _)<-readIORef w
         dr<-readIORef dragging
         case dr of
-            Grab ni -> drop ni
-            ConnectFrom _ _ -> do
+            Cursor _ (Grab ni) ->  toIdle
+            Cursor _ (ConnectFrom _) -> do
                 handled<-sequenceC $ map (conn pos) nodes
-                unless handled $ cancelConn
-            Idle -> void $ sequenceC $ map (activate pos) nodes
+                unless handled $ toIdle
+            Cursor _ Idle -> void $ sequenceC $ map (activate pos) nodes
     where
-        startConn sp cpos=writeIORef dragging $ ConnectFrom sp cpos
-        cancelConn=writeIORef dragging $ Idle
+        startConn sp cpos=writeIORef dragging $ Cursor cpos (ConnectFrom sp)
+        toIdle=modifyIORef dragging $ \(Cursor pos _)->Cursor pos Idle
         finishConn dp=do
             d<-readIORef dragging
             case d of
-                ConnectFrom sp _ -> ioConnect w sp dp >> cancelConn
+                Cursor _ (ConnectFrom sp) -> ioConnect w sp dp >> toIdle
                 _ -> error "finishConn: impossible state"
-        drop ni=writeIORef dragging Idle
-        pick ni=writeIORef dragging $ Grab ni
+        pick ni=modifyIORef dragging $ \(Cursor pos _)->Cursor pos (Grab ni)
         
         conn pos (nid,c,n)=sequenceC $ map (connPort (pos-c) nid) [0..5]
         
@@ -740,7 +745,7 @@ release darea cursor w=do
         (World nodes _ _)<-readIORef w
         c<-readIORef cursor
         case c of
-            Idle -> void $ sequenceC $ map (activate pos) nodes
+            Cursor _ Idle -> void $ sequenceC $ map (activate pos) nodes
             _ -> return ()
     where
         activate pos (nid,c,n)=checkNodeSpecial (pos-c) nid n
