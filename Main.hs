@@ -335,8 +335,8 @@ execCommonAction c w ni=do
                 then ioDisconnect w (ni,n) >> writeIORef c (Cursor False pressed pos Idle)
                 else writeIORef c $ Cursor False pressed pos (ConnectFrom (ni,n))
         onConnectFromPortActivate srcport n=bind (onPort n) $ do
-            ac<-portHasConnection w (ni,0)
-            unless (ac || (ni,0)==srcport) $ ioConnect w srcport (ni,0)
+            ac<-portHasConnection w (ni,n)
+            unless (ac || (ni,n)==srcport) $ ioConnect w srcport (ni,n)
             writeIORef c $ Cursor False pressed pos Idle
     
     -- cursor modification is only allowed to nodes that is 1.being grabbed or 2.onBody or 3.onPort
