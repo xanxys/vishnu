@@ -65,7 +65,7 @@ main=do
     mapM (\add_n->randomN2IO >>= add_n w . (+V.Vec2D 300 300) . (V.map (*100))) nodes
     
     -- create cursor state
-    cursor<-newIORef $ Cursor (V.Vec2D 0 0) Idle
+    cursor<-newIORef $ Cursor False False (V.Vec2D 0 0) Idle
     
     -- window close
     onDestroy window $ mainQuit -- window `on` destroyEvent doesn't work 
@@ -119,9 +119,12 @@ summary (RateCount mv)=do
 
 
 -- bare with the position, since gtk doesn't (seem to) provide cursor position outside of EventM monad.
-data Cursor=Cursor V.Vec2D CursorState
+data Cursor=Cursor
+    Bool -- ^ activate (changed to False when handled or moved)
+    Bool -- ^ pressed (continuous state)
+    V.Vec2D CursorState
 
-data CursorState=Idle|Grab NodeId|ConnectFrom PortDesc|Pan
+data CursorState=Idle|Grab NodeId|ConnectFrom PortDesc|Pan deriving(Eq)
 
 -- | desirable order:
 --  list all: O(N)
@@ -297,6 +300,8 @@ seqStep1 c w=do
         let p=V.Vec2D x y
         
         let (ni,_,n)=minimumBy (comparing $ \(_,q,_)->V.normSq (q-p)) nodes
+        
+        execCommonAction c w ni
         execNodeAction c w n ni
 
 
@@ -309,30 +314,83 @@ ioUpdateOPort w port d=do
             writeIORef w $ World nodes (map (\x->if f x then (fst x,d) else x) conns) exts
     where f=(==port) . fst . fst
 
+execCommonAction :: IORef Cursor -> IORef World -> NodeId -> IO ()
+execCommonAction c w ni=do
+    npos<-getNodePosition w ni
+    Cursor activate pressed pos st<-readIORef c
+    let
+        dp=pos-npos
+        onBody=V.norm dp<5
+        onPort n=V.norm (dp-center)<5
+            where
+                center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
+                theta=pi*0.1*fromIntegral n
+        bind cond action
+            |cond = action >> return True
+            |otherwise = return False
+        
+        onIdlePortActivate n=bind (onPort n) $ do
+            ac<-portHasConnection w (ni,n)
+            if ac
+                then ioDisconnect w (ni,n) >> writeIORef c (Cursor False pressed pos Idle)
+                else writeIORef c $ Cursor False pressed pos (ConnectFrom (ni,n))
+        onConnectFromPortActivate srcport n=bind (onPort n) $ do
+            ac<-portHasConnection w (ni,0)
+            unless (ac || (ni,0)==srcport) $ ioConnect w srcport (ni,0)
+            writeIORef c $ Cursor False pressed pos Idle
+    
+    -- cursor modification is only allowed to nodes that is 1.being grabbed or 2.onBody or 3.onPort
+    if activate
+        then void $ sequenceC $
+            case st of
+                Idle ->
+                    [bind (onBody) $ writeIORef c $ Cursor False pressed pos (Grab ni)]++
+                    map onIdlePortActivate [0..5]
+                ConnectFrom srcport -> map (onConnectFromPortActivate srcport) [0..5]
+                Grab x -> 
+                    [bind (x==ni) $ writeIORef c $ Cursor False pressed pos Idle
+                    ]
+        else do
+            void $ sequenceC $
+                [bind (st==Grab ni) $ modifyNodePosition w ni pos]
+        
+            
+
 -- TODO: IORef Cursor -> Interface
 execNodeAction :: IORef Cursor -> IORef World -> Node -> NodeId -> IO ()
 execNodeAction _ w (ConstNode d) ni=
     ioUpdateOPort w (ni,0) d
 
-execNodeAction _ w (PrimNode "int upcount") ni=do
-    World _ _ exts<-readIORef w
-    let Just x=lookup ni exts
-    ioUpdateOPort w (ni,0) x
+execNodeAction c w (PrimNode "int upcount") ni=do
+    p<-getNodePosition w ni
+    Cursor act pr cpos st<-readIORef c
+    let do_upcount=V.norm (cpos-p)<20 && act
+    count<-getNodeExtension w ni
+    if do_upcount
+        then do
+            let count'=addD count (IntData 1)
+            modifyNodeExtension w ni count'
+            writeIORef c $ Cursor False pr cpos st
+            ioUpdateOPort w (ni,0) count'
+        else do
+            ioUpdateOPort w (ni,0) count
 
-execNodeAction _ w (PrimNode "button") ni=do
-    World _ _ exts<-readIORef w
-    let Just x=lookup ni exts
-    ioUpdateOPort w (ni,0) x
+execNodeAction c w (PrimNode "button") ni=do
+    p<-getNodePosition w ni
+    Cursor _ pr cpos _<-readIORef c
+    let intst=BoolData $ V.norm (cpos-p)<20 && pr
+    -- TODO is it really necessary to store button state internally?
+    modifyNodeExtension w ni $ intst
+    ioUpdateOPort w (ni,0) intst
 
-execNodeAction _ w (PrimNode "display") ni=do
+execNodeAction c w (PrimNode "display") ni=do
     d<-readIPort w (ni,0)
-    modifyIORef w $
-        \(World nodes conns exts)->World nodes conns (map (\t@(i,_)->if ni/=i then t else (i,d)) exts)
+    modifyNodeExtension w ni d
     
 execNodeAction c w (PrimNode "cursor") ni=do
     i<-readIPort w (ni,0)
     p<-getNodePosition w ni
-    Cursor cpos _<-readIORef c
+    Cursor _ _ cpos _<-readIORef c
     case i of
         FloatData radius ->
             if V.norm (cpos-p)<radius then let V.Vec2D dx dy=cpos-p in do
@@ -434,7 +492,6 @@ execNodeAction _ w DisconnectNode ni=do
 
 execNodeAction _ w (WrapNode False) ni=do
     i<-readIPort w (ni,0)
-    (World nodes conns exts)<-readIORef w
     case i of
         EmptyData -> ioUpdateOPort w (ni,1) EmptyData
         _ -> do
@@ -483,6 +540,13 @@ getNode w nid=do
 
 getNodePosition w nid=liftM (fst .fromJust)$ getNode w nid
 
+getNodeExtension :: IORef World -> NodeId -> IO Data
+getNodeExtension w ni=do
+    World _ _ exts<-readIORef w
+    case find ((==ni) . fst) exts of
+        Nothing -> error "getNodeExtension: no data"
+        Just (_,d) -> return d
+    
 
 modifyNodeContent :: IORef World -> NodeId -> Node -> IO ()
 modifyNodeContent w nid n=do
@@ -494,6 +558,10 @@ modifyNodePosition w ni p=do
     World nodes conns exts<-readIORef w
     writeIORef w $ World (map (\t@(i,_,n)->if i/=ni then t else (i,p,n)) nodes) conns exts
 
+modifyNodeExtension :: IORef World -> NodeId -> Data -> IO ()
+modifyNodeExtension w ni d=do
+    World nodes conns exts<-readIORef w
+    writeIORef w $ World nodes conns (map (\t@(i,_)->if i/=ni then t else (ni,d)) exts)
 
 pure1i1o f w ni=do
     i0<-readIPort w (ni,0)
@@ -582,7 +650,7 @@ renderWorld cursor (World nodes conns exts)=do
     mapM_ (\((src,dst),_)->arrow (portPos src) (portPos dst)) conns
     
     case cursor of
-        Cursor cpos (ConnectFrom src) -> arrow (portPos src)  cpos
+        Cursor _ _ cpos (ConnectFrom src) -> arrow (portPos src)  cpos
         _ -> return ()
     
     -- extended  structure
@@ -661,118 +729,27 @@ rotateCCW (V.Vec2D x y)=V.Vec2D (-y) x
 
 
 move :: DrawingArea -> IORef Cursor -> IORef World -> EventM EMotion ()
-move widget cursor w=do
-    Cursor _ cst<-liftIO $ readIORef cursor
-    pos<-liftM (uncurry V.Vec2D) eventCoordinates
-    case cst of
-        -- TODO replace Grab behavior w/ in-system code
-        Grab nid -> do
-            (World nodes conns exts)<-liftIO $ readIORef w
-            let nodes'=map (\t@(i,_,n)->if nid/=i then t else (i,pos,n)) nodes
-            liftIO $ writeIORef w $ World nodes' conns exts
-        _ -> return ()
-    liftIO $ writeIORef cursor $ Cursor pos cst
+move widget c w=do
+    pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
+    Cursor act pr _ st<-liftIO $ readIORef c
+    case (act,st) of
+        (True,ConnectFrom _) -> 
+            liftIO $ writeIORef c $ Cursor False pr pos Idle -- cancel connection
+            -- TODO this canceleation behavior is a little bit unintuitive. timer is better.
+        _ ->
+            liftIO $ writeIORef c $ Cursor False pr pos st
 
 press :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
-press widget dragging w=do
+press widget c w=do
     pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
-    liftIO $ do
-        (World nodes _ _)<-readIORef w
-        dr<-readIORef dragging
-        case dr of
-            Cursor _ (Grab ni) ->  toIdle
-            Cursor _ (ConnectFrom _) -> do
-                handled<-sequenceC $ map (conn pos) nodes
-                unless handled $ toIdle
-            Cursor _ Idle -> void $ sequenceC $ map (activate pos) nodes
-    where
-        startConn sp cpos=writeIORef dragging $ Cursor cpos (ConnectFrom sp)
-        toIdle=modifyIORef dragging $ \(Cursor pos _)->Cursor pos Idle
-        finishConn dp=do
-            d<-readIORef dragging
-            case d of
-                Cursor _ (ConnectFrom sp) -> ioConnect w sp dp >> toIdle
-                _ -> error "finishConn: impossible state"
-        pick ni=modifyIORef dragging $ \(Cursor pos _)->Cursor pos (Grab ni)
-        
-        conn pos (nid,c,n)=sequenceC $ map (connPort (pos-c) nid) [0..5]
-        
-        
-        activate pos (nid,c,n)=checkPorts pos (pos-c) nid `chain` checkNode (pos-c) nid n
-        
-        checkPorts cpos d nid=sequenceC $ map (checkPort cpos d nid) [0..5]
-        
-        connPort d nid pix=do
-            let
-                center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
-                theta=pi*0.1*fromIntegral pix
-            
-            if V.norm (center-d)<5
-                then finishConn (nid,pix) >> return True
-                else return False
-        
-        checkPort cpos d nid pix=do
-            let
-                center=V.map (*30) (V.Vec2D (cos theta) (sin theta))
-                theta=pi*0.1*fromIntegral pix
-            
-            if V.norm (center-d)<5
-                then do
-                    ex<-portHasConnection w (nid,pix)
-                    if ex then ioDisconnect w (nid,pix) else startConn (nid,pix) cpos
-                    return True
-                else return False
-        
-        -- Idle
-        checkNode p nid n
-            |V.norm p<5 = pick nid >> return True
-            |otherwise = checkNodeSpecial p nid n
-        
-        checkNodeSpecial p nid (PrimNode "int upcount")
-            |V.norm p<20  =do
-                    (World nodes conns exts)<-readIORef w
-                    -- TODO: ?
-                    let
-                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,addD n (IntData 1))) exts
-                        Just ttt=find ((==nid) . fst) exts'
-                    writeIORef w $ World nodes conns exts'
-                    return True
-            |otherwise = return False
-        checkNodeSpecial p nid (PrimNode "button")
-            |V.norm p<20 = do
-                    (World nodes conns exts)<-readIORef w
-                    let
-                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,BoolData True)) exts
-                        Just ttt=find ((==nid) . fst) exts'
-                    writeIORef w $ World nodes conns exts'
-                    return True
-            |otherwise = return False
-        checkNodeSpecial _ _ _=return False
-
+    Cursor _ _ _ st<-liftIO $ readIORef c
+    liftIO $ writeIORef c $ Cursor True True pos st
 
 release :: DrawingArea -> IORef Cursor -> IORef World -> EventM EButton ()
-release darea cursor w=do
+release darea c w=do
     pos<-liftM (uncurry $ V.Vec2D) eventCoordinates
-    liftIO $ do
-        (World nodes _ _)<-readIORef w
-        c<-readIORef cursor
-        case c of
-            Cursor _ Idle -> void $ sequenceC $ map (activate pos) nodes
-            _ -> return ()
-    where
-        activate pos (nid,c,n)=checkNodeSpecial (pos-c) nid n
-        
-        checkNodeSpecial p nid (PrimNode "button")
-            |V.norm p<20 = do
-                    (World nodes conns exts)<-readIORef w
-                    let
-                        exts'=map (\(i,n)->if i/=nid then (i,n) else (i,BoolData False)) exts
-                        Just ttt=find ((==nid) . fst) exts'
-                    writeIORef w $ World nodes conns exts'
-                    return True
-            |otherwise = return False
-        checkNodeSpecial _ _ _=return False
-
+    Cursor act _ _ st<-liftIO $ readIORef c
+    liftIO $ writeIORef c $ Cursor act False pos st
 
 applyV f (V.Vec2D x y)=f x y
 
